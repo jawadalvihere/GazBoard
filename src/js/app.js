@@ -1201,6 +1201,21 @@ class App {
       case 'board.save': saveBoardFile(this); break;
       case 'board.open': openBoardFile(this); break;
       case 'board.new':
+        // Inside a lesson, "new board" means "I am done with this lesson" -
+        // the boards on screen belong to the room, not to you, so making a
+        // fresh one has to step out of the room first or you would still be
+        // looking at the student's work with your own new board nowhere.
+        if (this.roomMode) {
+          this.confirm('Leave this lesson?',
+            'You will go back to your own boards. The lesson and its link stay as they are — open the link again to return to it.',
+            'Leave')
+            .then(async (ok) => {
+              if (!ok) return;
+              await room.leaveRoom();
+              this.newBoard();
+            });
+          break;
+        }
         this.confirm('New board?', 'Your current board is saved automatically and stays in "My boards".', 'Create')
           .then((ok) => { if (ok) this.newBoard(); });
         break;

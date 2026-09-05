@@ -616,14 +616,15 @@ kbd {
   animation: room-pulse 1.6s ease-in-out infinite;
 }
 @keyframes room-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
-.room-share { margin-left: auto; }
+.room-actions { margin-left: auto; display: flex; gap: 6px; flex-shrink: 0; }
+.room-actions .btn { padding: 5px 12px; font-size: 12.5px; }
 
 @media (max-width: 480px) {
   #roomBar { padding: 5px 8px; gap: 6px; }
   .room-tab { padding: 5px 10px; font-size: 12.5px; }
   /* The running commentary is the first thing to go when there is no room. */
   .room-state { display: none; }
-  .room-share { padding: 5px 10px; font-size: 12.5px; }
+  .room-actions .btn { padding: 5px 9px; font-size: 12px; }
 }
 
 /* Marking someone's work while they are not there is the one room state that

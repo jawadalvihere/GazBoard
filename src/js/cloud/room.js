@@ -176,12 +176,26 @@ onAuthChange(async () => {
   } catch {}
 });
 
+/**
+ * Step out of a room.
+ *
+ * The link has to come out of the address bar as well as the state, or a
+ * reload drops straight back into the lesson that was just left - and on a
+ * phone, where reloading is how people fix anything, that reads as being
+ * unable to get out at all.
+ */
 export async function leaveRoom() {
   if (!_token) return;
   await saveNow();
+  if (_outTimer) { clearTimeout(_outTimer); _outTimer = null; }
+  _outbox = [];
   if (_channel) { try { await _channel.unsubscribe(); } catch {} _channel = null; }
-  _token = null; _role = null; _viewing = null;
-  if (_app) _app.roomMode = false;
+  _token = null; _role = null; _viewing = null; _otherPresent = false;
+  if (_app) {
+    _app.roomMode = false;
+    _app.setCorrectionPen(false);
+  }
+  try { history.replaceState(null, '', location.pathname); } catch {}
   announce();
 }
 

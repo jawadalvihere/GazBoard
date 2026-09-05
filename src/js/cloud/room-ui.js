@@ -48,12 +48,30 @@ function render() {
 
   _bar.appendChild(h('div', { class: 'room-state' }, stateLine()));
 
+  const actions = h('div', { class: 'room-actions' });
   if (mine === 'teacher') {
-    _bar.appendChild(h('button', {
-      class: 'btn room-share',
+    actions.appendChild(h('button', {
+      class: 'btn',
       onclick: () => shareDialog(room.roomLink())
     }, 'Share link'));
   }
+  // Everyone gets a way out. Without one the only exit is editing the address
+  // bar, which on a phone is no exit at all.
+  actions.appendChild(h('button', {
+    class: 'btn',
+    onclick: async () => {
+      const ok = await _app.confirm('Leave this lesson?',
+        mine === 'teacher'
+          ? 'You will go back to your own boards. The lesson is kept — your link still opens it.'
+          : 'You will go back to your own boards. Open the link again to rejoin.',
+        'Leave');
+      if (!ok) return;
+      await room.leaveRoom();
+      _app.newBoard(true);
+      _app.toast('Left the lesson', 'check');
+    }
+  }, 'Leave'));
+  _bar.appendChild(actions);
 }
 
 /**
@@ -92,6 +110,18 @@ export async function startRoom(app) {
     app.toast('Sign in first - a lesson room belongs to your account', 'close');
     return;
   }
+
+  // Starting a lesson while already in one means a NEW lesson: a new link and
+  // two empty boards. Leaving first makes that literal, rather than leaving
+  // the old room's channel open underneath the new one.
+  if (room.inRoom()) {
+    const ok = await app.confirm('Start a new lesson?',
+      'You will get a fresh link and two empty boards. The lesson you are in now is kept — its old link still opens it.',
+      'New lesson');
+    if (!ok) return;
+    await room.leaveRoom();
+  }
+
   app.toast('Opening a lesson room…');
   const res = await room.createRoom(app.store.doc.name || 'Lesson');
   if (!res.ok) { app.toast(res.error, 'close'); return; }
