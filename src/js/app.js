@@ -40,6 +40,10 @@ const DEFAULT_SETTINGS = {
   // lands off the edge of a laptop and reads as lost. A fixed sheet gives both
   // devices the same rectangle to fit. Set to 'infinite' for the old default.
   defaultPaper: 'a4', defaultOrientation: 'portrait',
+  // Pin the view to the sheet so a stray finger cannot carry the page off
+  // mid-sentence. null = decide by device: fingers misfire in a way a mouse
+  // does not, so a touchscreen starts locked and a laptop does not.
+  lockView: null,
   inkToShape: false, pressure: true, wheelZoom: false, returnToSelect: true, autosave: true,
   edgePan: true, importQuality: 2, lowLatencyInk: false, laserColor: '#ff2d2d', showToolKeys: true,
   rightDragPans: true, hintsSeen: {},
@@ -1072,6 +1076,7 @@ class App {
       case 'page.delete': this.deletePage(); break;
       case 'page.next': this.nextPage(); break;
       case 'page.prev': this.prevPage(); break;
+      case 'lockView': case 'view.lock': this.toggleViewLock(); break;
       case 'page.fitContent': this.fitContentToPage(); break;
       case 'board.save': saveBoardFile(this); break;
       case 'board.open': openBoardFile(this); break;
@@ -1164,6 +1169,7 @@ class App {
   }
 
   syncPageLabel() {
+    this.syncLockButton();
     const bar = document.getElementById('pagebar');
     if (!bar) return;
     const n = this.pageCount;
@@ -1174,6 +1180,26 @@ class App {
     if (label) label.textContent = `Page ${i + 1} of ${n}`;
     bar.querySelector('[data-page="prev"]').disabled = i <= 0;
     bar.querySelector('[data-page="next"]').disabled = i >= n - 1;
+  }
+
+  /** Show the lock only on a pad, and let it say which way it is set. */
+  syncLockButton() {
+    const btn = document.getElementById('lockViewBtn');
+    if (!btn) return;
+    btn.hidden = this.pageCount === 0;
+    if (btn.hidden) return;
+    const on = this.viewLocked;
+    btn.innerHTML = icon(on ? 'lock' : 'unlock', 18);
+    btn.classList.toggle('active', on);
+    // The narrow layout normally drops the zoom buttons for room. While locked
+    // they are the only way left to get a closer look, so they come back -
+    // otherwise "fingers cannot, buttons can" would be a promise the phone
+    // does not keep.
+    document.getElementById('zoombar')?.classList.toggle('view-locked', on);
+    btn.title = on
+      ? 'Page is locked - two fingers turn the page. Tap to unlock.'
+      : 'Lock the page so it cannot be moved by accident';
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
   }
 
   /**
@@ -1309,6 +1335,33 @@ class App {
 
   get pages() { return this.store.doc.pages; }
   get pageCount() { return this.store.doc.pages.length; }
+
+  /**
+   * Is the view pinned to the sheet?
+   *
+   * Only ever true on a pad. On an infinite board there is no correct view to
+   * hold you at, so locking would just trap you somewhere arbitrary with no
+   * way to look around - the lock means "keep showing me the whole page", and
+   * without a page it means nothing.
+   */
+  get viewLocked() {
+    if (!this.pageCount) return false;
+    const pref = this.settings.lockView;
+    if (pref === null || pref === undefined) {
+      // A coarse pointer is a finger, and fingers brush the glass by accident.
+      return typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+    }
+    return !!pref;
+  }
+
+  toggleViewLock() {
+    const next = !this.viewLocked;
+    this.settings.lockView = next;
+    this.saveSettings();
+    if (next) this.fitToPage(this.currentPageIndex());
+    this.syncUI();
+    this.toast(next ? 'Page locked - two fingers turn the page' : 'Page unlocked - pinch to zoom', next ? 'lock' : 'unlock');
+  }
 
   /** Which sheet the view is looking at, by what is in the middle of the window. */
   currentPageIndex() {
@@ -1935,7 +1988,15 @@ class App {
     window.board.onWindowResized(() => {
       // the window changed shape - re-measure now and again after layout settles
       this.surface.resize();
-      requestAnimationFrame(() => { this.surface.resize(); this.textEditor.reposition(); this.syncUI(); });
+      requestAnimationFrame(() => {
+        this.surface.resize();
+        this.textEditor.reposition();
+        // Turning a phone sideways changes what "the whole page" means, so a
+        // locked view has to re-frame or the lock would hold you at a fit
+        // computed for a shape the screen no longer is.
+        if (this.viewLocked) this.fitToPage(this.currentPageIndex());
+        this.syncUI();
+      });
     });
 
     document.addEventListener('keydown', (e) => this.onKeyDown(e));

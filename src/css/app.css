@@ -453,6 +453,9 @@ kbd {
 
 @media (max-width: 620px) {
   #zoombar [data-cmd="zoomIn"], #zoombar [data-cmd="zoomOut"] { display: none; }
+  /* Locked, these are the only way left to look closer - see syncLockButton(). */
+  #zoombar.view-locked [data-cmd="zoomIn"],
+  #zoombar.view-locked [data-cmd="zoomOut"] { display: grid; }
   #toasts { max-width: 92vw; }
 }
 
@@ -570,4 +573,11 @@ kbd {
   }
   .sync-pill::before { width: 9px; height: 9px; }
   .sync-pill:hover { background: transparent; }
+}
+
+/* The page lock sits with the zoom controls and shows its state, because a
+   lock you cannot tell the state of is worse than no lock at all. */
+#zoombar [data-cmd="lockView"].active {
+  color: var(--accent-2);
+  background: color-mix(in srgb, var(--accent-2) 12%, transparent);
 }

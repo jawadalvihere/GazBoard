@@ -121,6 +121,11 @@ export function initToolbar(app) {
   }
   document.getElementById('panelClose').innerHTML = icon('close', 18);
 
+  // The lock swaps its own icon to say which way it is set, so it is wired
+  // apart from the buttons whose icon never changes.
+  const lockBtn = document.getElementById('lockViewBtn');
+  lockBtn.addEventListener('click', () => app.command('lockView'));
+
   for (const [sel, name] of [['[data-cmd="zoomOut"]', 'zoomOut'], ['[data-cmd="zoomIn"]', 'zoomIn'], ['[data-cmd="fit"]', 'fit']]) {
     const el = document.querySelector('#zoombar ' + sel);
     el.innerHTML = icon(name, 18);
