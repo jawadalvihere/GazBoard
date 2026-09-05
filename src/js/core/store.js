@@ -107,10 +107,8 @@ export class Store {
     this.undoStack.push({ label, ops, inverse });
     if (this.undoStack.length > this.maxUndo) this.undoStack.shift();
     this.redoStack.length = 0;
-    for (const op of ops) {
-      this.log.push({ ...op, c: CLIENT_ID, ts: Date.now() });
-      for (const f of this._opSubs) f(op);
-    }
+    for (const op of ops) this.log.push({ ...op, c: CLIENT_ID, ts: Date.now() });
+    this._broadcast(ops);
     if (this.log.length > this.maxLog) this.log.splice(0, this.log.length - this.maxLog);
     this.emit(label);
   }
@@ -151,11 +149,26 @@ export class Store {
   /** Apply ops from a remote peer - no undo entry, no rebroadcast. */
   applyRemote(ops) { for (const op of ops) this._apply(op); this.emit('remote'); }
 
+  /**
+   * Push ops onto the op channel. Undo and redo go through here as well as
+   * commit: they are real mutations, and a peer that never hears about them
+   * keeps showing the stroke this device just took back.
+   */
+  _broadcast(ops) {
+    if (!this._opSubs.size) return;
+    for (const op of ops) {
+      for (const f of this._opSubs) {
+        try { f(op); } catch {}
+      }
+    }
+  }
+
   undo() {
     const tx = this.undoStack.pop();
     if (!tx) return false;
     for (const op of tx.inverse) this._apply(op);
     this.redoStack.push(tx);
+    this._broadcast(tx.inverse);
     this.emit('undo');
     return true;
   }
@@ -165,6 +178,7 @@ export class Store {
     if (!tx) return false;
     for (const op of tx.ops) this._apply(op);
     this.undoStack.push(tx);
+    this._broadcast(tx.ops);
     this.emit('redo');
     return true;
   }

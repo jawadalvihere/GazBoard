@@ -1,7 +1,14 @@
 // Complete Web Platform Adapter implementing the `window.board` bridge.
 // Provides 100% API parity with the Electron preload bridge using standard browser APIs.
 
-import * as storage from './web-storage.js';
+// Boards and assets go through the cloud layer, which writes to the same
+// IndexedDB as before and mirrors to Supabase only while signed in. Signed
+// out, every call below behaves exactly as it did when it pointed straight
+// at web-storage.js.
+import * as indexedDbStorage from './web-storage.js';
+import * as storage from '../cloud/cloud-storage.js';
+
+storage.setLocalBackend(indexedDbStorage);
 import * as files from './web-files.js';
 import { generatePdfFromHtml } from './web-pdf.js';
 import * as updater from './update-manager.js';

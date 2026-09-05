@@ -3,13 +3,17 @@
 
 import { createWebAdapter, emitOpenFile } from './web-adapter.js';
 import { registerSessionFile } from './web-files.js';
+import * as cloudStorage from '../cloud/cloud-storage.js';
 
 export function initPlatform() {
   if (typeof window === 'undefined') return;
 
   // 1. Electron Runtime Detection
   if (window.board && typeof window.board.info === 'function') {
-    // Electron's preload script has already mounted window.board.
+    // Electron's preload script has already mounted window.board. Boards and
+    // assets keep going to disk exactly as before; the cloud layer wraps that
+    // so the desktop app takes part in sync on the same terms as the PWA.
+    attachCloudToBridge();
     return;
   }
 
@@ -62,6 +66,47 @@ export function initPlatform() {
       }
     }
   });
+}
+
+/**
+ * Route the desktop bridge's board and asset calls through the cloud layer.
+ *
+ * contextBridge defines window.board as a read-only property, so the wrapper
+ * has to be installed with defineProperty rather than plain assignment. If
+ * that is refused the app carries on with the untouched bridge - local-only,
+ * exactly as upstream behaves - rather than failing to start.
+ */
+function attachCloudToBridge() {
+  const bridge = window.board;
+  try {
+    cloudStorage.setLocalBackend(cloudStorage.backendFromBridge(bridge));
+
+    const wrapped = {
+      ...bridge,
+      boards: {
+        list: () => cloudStorage.listBoards(),
+        load: (id) => cloudStorage.loadBoard(id),
+        save: (b) => cloudStorage.saveBoard(b),
+        remove: (id) => cloudStorage.deleteBoard(id),
+        last: () => cloudStorage.getLastBoard(),
+        setLast: (id) => cloudStorage.setLastBoard(id),
+        resume: () => cloudStorage.resumeBoard(),
+        migrate: () => cloudStorage.migrateLegacyData()
+      },
+      assets: {
+        put: (dataUrl) => cloudStorage.putAsset(dataUrl),
+        get: (id) => cloudStorage.getAsset(id),
+        have: (ids) => cloudStorage.haveAssets(ids)
+      }
+    };
+
+    Object.defineProperty(window, 'board', {
+      value: wrapped, writable: true, configurable: true
+    });
+  } catch (e) {
+    console.warn('[cloud] desktop bridge left unwrapped; sync disabled here:', e.message);
+    cloudStorage.setLocalBackend(cloudStorage.backendFromBridge(bridge));
+  }
 }
 
 // Auto-run on import

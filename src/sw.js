@@ -40,6 +40,12 @@ const PRECACHE_ASSETS = [
   './js/ui/popover.js',
   './js/ui/textedit.js',
   './js/ui/toolbar.js',
+  './js/vendor/supabase.js',
+  './js/cloud/config.js',
+  './js/cloud/client.js',
+  './js/cloud/cloud-storage.js',
+  './js/cloud/sync.js',
+  './js/cloud/ui.js',
   './js/platform/platform.js',
   './js/platform/web-adapter.js',
   './js/platform/web-storage.js',
@@ -103,6 +109,13 @@ self.addEventListener('fetch', (event) => {
 
   // Ignore cross-origin non-http(s) requests
   if (!url.protocol.startsWith('http')) return;
+
+  // Sync traffic goes straight to the network. These responses are
+  // per-user and authenticated, so the shared cache is the wrong place for
+  // them, and board images already keep a durable copy in IndexedDB. Without
+  // this the cache-first branch below would answer a signed-in request with
+  // whatever it happened to store earlier.
+  if (url.hostname.endsWith('.supabase.co')) return;
 
   // Never cache version check manifest or update API
   if (url.pathname.endsWith('/version.json') || url.searchParams.has('t')) {

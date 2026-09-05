@@ -22,6 +22,8 @@ import {
   pickAndInsertDocument, pickAndInsertImage, insertDocument,
   insertImagesFromPaths, insertImageFiles, dropOrigin, isImagePath, isDocPath
 } from './insert.js';
+import * as cloudSync from './cloud/sync.js';
+import { mountSyncUI } from './cloud/ui.js';
 
 const DEFAULT_SETTINGS = {
   penColor: '#201f1e', penWidth: 4, penEffect: 'none',
@@ -209,6 +211,33 @@ class App {
       if (!(this.unsavedNew && !this.store.objects.length)) this.markDirty();
       this.autosave();                                  // persist() decides whether to write
     });
+
+    /* ---------------- cloud sync ----------------
+     * attach() only starts listening; nothing leaves this device until
+     * somebody signs in, so an untouched build behaves exactly as before.
+     *
+     * The board channel is picked up from the document rather than hooked
+     * into loadBoard/newBoard individually, because a board can also become
+     * current by being opened from a file, imported, or substituted after a
+     * delete - and every one of those routes ends here. */
+    cloudSync.attach(this.store);
+    this._syncBoardId = null;
+    const followBoard = () => {
+      const id = this.store.doc?.id || null;
+      if (id === this._syncBoardId) return;
+      this._syncBoardId = id;
+      cloudSync.setBoard(id);
+    };
+    this.store.subscribe(followBoard);
+    followBoard();
+
+    cloudSync.onStatus((state) => {
+      // A pull can bring in a board edited on the other device; the list in
+      // the boards panel is otherwise only rebuilt when it is opened.
+      if (state === 'live') this.syncUI();
+    });
+
+    mountSyncUI(this);
   }
 
   /** True while a pointer gesture is mid-flight. Reads one flag; never the board. */

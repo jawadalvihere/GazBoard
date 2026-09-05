@@ -164,5 +164,8 @@
       ]
     }
   },
-  "desktopName": "gazboard.desktop"
+  "desktopName": "gazboard.desktop",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.115.0"
+  }
 }

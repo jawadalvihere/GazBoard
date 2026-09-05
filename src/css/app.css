@@ -513,3 +513,61 @@ kbd {
   .tpl-grid { grid-template-columns: 1fr; }
 }
 
+
+/* ---------------- cloud sync ---------------- */
+
+/* The pill doubles as the sign-in button, so unlike the Saved badge it has to
+   survive the narrow-screen rules below - the phone is the device you are most
+   likely to be signing in on. */
+.sync-pill {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-2);
+  transition: color .15s, background .15s;
+}
+.sync-pill::before {
+  content: '';
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.sync-pill:hover { background: var(--surface); border-color: var(--stroke-2); }
+.sync-pill[data-sync="live"]       { color: #0b6a0b; }
+.sync-pill[data-sync="connecting"] { color: #8a6d00; }
+.sync-pill[data-sync="error"]      { color: var(--danger); }
+.sync-pill[data-sync="offline"],
+.sync-pill[data-sync="off"]        { color: var(--text-2); }
+
+.sync-form { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 2px; }
+.sync-input {
+  padding: 8px 10px;
+  border: 1px solid var(--stroke-2);
+  border-radius: 6px;
+  font-size: 14px;           /* 16px or more avoids iOS zooming the page on focus;
+                                14px plus the viewport lock in index.html is enough */
+  background: var(--surface);
+  color: var(--text);
+}
+.sync-input:focus { outline: none; border-color: var(--accent-2); }
+.sync-error { color: var(--danger); font-size: 12.5px; margin: 2px 0 0; }
+.sync-state { font-size: 12.5px; }
+
+@media (max-width: 480px) {
+  /* Text would crowd out the board title, so it becomes a tappable dot with a
+     proper touch target around it. */
+  .sync-pill {
+    display: inline-flex;
+    justify-content: center;
+    width: 30px; height: 30px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    font-size: 0;
+    gap: 0;
+  }
+  .sync-pill::before { width: 9px; height: 9px; }
+  .sync-pill:hover { background: transparent; }
+}
