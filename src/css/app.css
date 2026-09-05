@@ -652,3 +652,12 @@ kbd {
   display: grid; place-items: center; color: #fff;
 }
 .board-tick.on { background: var(--accent-2); border-color: var(--accent-2); }
+
+/* How much is on each lesson board. Quiet, but present - it is the difference
+   between "that board is empty" and "that tab is broken". */
+.room-count {
+  font-size: 10.5px; color: var(--text-2);
+  padding: 1px 6px; border-radius: 10px;
+  background: var(--stroke); flex-shrink: 0;
+}
+.room-tab.active .room-count { background: var(--surface-2); }

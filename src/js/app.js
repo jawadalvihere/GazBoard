@@ -1206,13 +1206,18 @@ class App {
         // fresh one has to step out of the room first or you would still be
         // looking at the student's work with your own new board nowhere.
         if (this.roomMode) {
-          this.confirm('Leave this lesson?',
-            'You will go back to your own boards. The lesson and its link stay as they are — open the link again to return to it.',
-            'Leave')
+          // Titled for what was clicked, not for the side effect. "Leave this
+          // lesson?" after pressing New board reads like the wrong dialog, and
+          // the safe move against a dialog you did not expect is Cancel - which
+          // then looks like New board doing nothing at all.
+          this.confirm('New board?',
+            'You are in a lesson, so this will leave it and give you a board of your own. The lesson is kept — open its link again to come back to it.',
+            'New board')
             .then(async (ok) => {
               if (!ok) return;
               await room.leaveRoom();
               this.newBoard();
+              this.toast('Left the lesson — this board is yours', 'check');
             });
           break;
         }

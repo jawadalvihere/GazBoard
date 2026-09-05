@@ -37,10 +37,19 @@ function render() {
   _bar.hidden = false;
   _bar.innerHTML = '';
 
-  const tab = (side, label) => h('button', {
-    class: 'room-tab' + (viewing === side ? ' active' : '') + (mine === side ? ' own' : ''),
-    onclick: () => room.showSide(side)
-  }, label, mine === side ? h('span', { class: 'room-you' }, 'you') : null);
+  const counts = room.counts();
+  const tab = (side, label) => {
+    const n = counts[side];
+    // Saying how much is on each board is what stops an empty one reading as a
+    // tab that did not respond: switching to a blank page looks identical to
+    // nothing happening unless the tab already told you it was blank.
+    const note = n === null ? null
+      : h('span', { class: 'room-count' }, n === 0 ? 'empty' : String(n));
+    return h('button', {
+      class: 'room-tab' + (viewing === side ? ' active' : '') + (mine === side ? ' own' : ''),
+      onclick: () => room.showSide(side)
+    }, label, mine === side ? h('span', { class: 'room-you' }, 'you') : null, note);
+  };
 
   _bar.appendChild(h('div', { class: 'room-tabs' },
     tab('teacher', 'Teacher'),

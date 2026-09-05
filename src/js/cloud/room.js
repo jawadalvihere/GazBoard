@@ -31,6 +31,10 @@ let _outTimer = null;
 let _saveTimer = null;
 let _applyingRemote = false;
 let _otherPresent = false;
+// How much is on each board, from the last read. The tabs show it, so a
+// switch to an empty board reads as "this board is empty" rather than as
+// a click that did nothing.
+let _counts = { teacher: null, student: null };
 
 const _subs = new Set();
 
@@ -55,6 +59,9 @@ export function canWrite() {
 
 /** Is the other person connected right now? */
 export function otherPresent() { return _otherPresent; }
+
+/** Items on each board as of the last read; null where not yet known. */
+export function counts() { return _counts; }
 
 export function onRoomChange(fn) {
   _subs.add(fn);
@@ -146,6 +153,7 @@ export async function enterRoom(app, token) {
     if (!_token || _applyingRemote) return;
     if (!canWrite()) return;               // watching, not working
     if (!isMine() && !_otherPresent) warnUnsaved();
+    if (_counts[_viewing] !== null) { _counts[_viewing] = _app.store.count; announce(); }
     _outbox.push(op);
     if (!_outTimer) _outTimer = setTimeout(flushOps, 60);
     scheduleSave();
@@ -221,6 +229,11 @@ export async function showSide(side, prefetched = null) {
     if (!room) { _app.toast('Lost the lesson room', 'close'); return; }
     _title = room.title || _title;
   }
+
+  _counts = {
+    teacher: (room.teacher_doc && room.teacher_doc.objects || []).length,
+    student: (room.student_doc && room.student_doc.objects || []).length
+  };
 
   _viewing = side;
   const doc = side === 'teacher' ? room.teacher_doc : room.student_doc;
