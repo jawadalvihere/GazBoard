@@ -166,6 +166,38 @@ export async function flushPush() {
   notify('pushed');
 }
 
+/**
+ * Upsert one board and wait for it to land.
+ *
+ * Joining a board's live channel is only permitted for a board the server can
+ * see you own, so a board that exists solely on this device cannot have a
+ * channel yet. Callers use this to make the row real before subscribing,
+ * rather than racing the debounced snapshot and failing the join.
+ */
+export async function ensureBoardRow(doc) {
+  if (!_userId || !doc || !doc.id) return false;
+  const c = getClient();
+  if (!c) return false;
+  try {
+    const { error } = await c.from('gaz_boards').upsert({
+      id: doc.id,
+      owner: _userId,
+      name: doc.name || 'Untitled board',
+      doc,
+      thumb: doc.thumb || null,
+      objects: Array.isArray(doc.order) ? doc.order.length : Object.keys(doc.objects || {}).length,
+      modified: doc.modified || Date.now(),
+      deleted: false,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'id' });
+    if (error) throw error;
+    return true;
+  } catch (e) {
+    console.warn('[cloud] could not register board:', e.message);
+    return false;
+  }
+}
+
 /* ---------------- pull ---------------- */
 
 export async function pullOne(id) {

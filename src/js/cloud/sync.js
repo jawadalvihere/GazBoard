@@ -30,7 +30,14 @@ let _snapTimer = null;
 let _applyingRemote = false;
 
 const _statusSubs = new Set();
+const _pulledSubs = new Set();
 let _status = 'off';   // off | connecting | live | offline | error
+
+/** Fires when boards arrived from another device and local storage changed. */
+export function onPulled(fn) {
+  _pulledSubs.add(fn);
+  return () => _pulledSubs.delete(fn);
+}
 
 export function onStatus(fn) {
   _statusSubs.add(fn);
@@ -58,6 +65,13 @@ export function attach(store) {
   if (_store) return;
   _store = store;
 
+  cloud.onCloudChange((reason) => {
+    if (reason !== 'pulled') return;
+    for (const fn of _pulledSubs) {
+      try { fn(); } catch {}
+    }
+  });
+
   store.onOp((op) => {
     // Anything arriving from the network is applied through applyRemote,
     // which does not touch the op channel - but undo/redo does, so guard.
@@ -68,16 +82,38 @@ export function attach(store) {
   });
 
   // A board saved while offline still needs to reach the cloud eventually.
-  window.addEventListener('online', () => {
-    if (_enabled) {
-      setStatus('connecting');
-      cloud.flushPush().then(() => cloud.pullAll()).catch(() => {});
-      if (_boardId) join(_boardId);
-    }
-  });
+  window.addEventListener('online', () => { if (_enabled) resume('online'); });
   window.addEventListener('offline', () => {
     if (_enabled) setStatus('offline');
   });
+
+  // The one that actually matters on a phone. Switching apps - to read the
+  // confirmation email, to answer a message - suspends the socket, and the
+  // browser fires no network event when it comes back, so without this the
+  // status sticks wherever it died and never recovers.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && _enabled) resume('foreground');
+  });
+  window.addEventListener('pageshow', () => { if (_enabled) resume('pageshow'); });
+}
+
+/** Re-establish everything after a gap: catch up, then get the channel back. */
+async function resume(reason) {
+  if (!navigator.onLine) { setStatus('offline'); return; }
+  if (_status === 'live' && _channel && reason === 'foreground') {
+    // Already connected and nothing suggests otherwise - just catch up
+    // quietly rather than tearing a working channel down.
+    cloud.flushPush().then(() => cloud.pullAll()).catch(() => {});
+    return;
+  }
+  setStatus('connecting');
+  try {
+    const c = getClient();
+    if (c) await c.realtime.setAuth();
+    await cloud.flushPush();
+    await cloud.pullAll();
+  } catch {}
+  if (_boardId) await join(_boardId);
 }
 
 export async function enable(userId) {
@@ -120,12 +156,18 @@ export async function setBoard(id) {
   if (_enabled && _boardId) await join(_boardId);
 }
 
-async function join(id) {
+async function join(id, attempt = 0) {
   const c = getClient();
   if (!c || !id) return;
 
   await leave();
   setStatus(navigator.onLine ? 'connecting' : 'offline');
+
+  // The server only lets you into a board's channel if it can see you own
+  // that board, so a board that has only ever existed on this device has to
+  // be registered first. Otherwise the very first board a device makes can
+  // never go live - which is exactly what a freshly signed-in phone has.
+  if (_store?.doc?.id === id) await cloud.ensureBoardRow(_store.doc);
 
   _channel = c.channel(id, {
     config: {
@@ -153,9 +195,25 @@ async function join(id) {
   });
 
   _channel.subscribe((state) => {
-    if (state === 'SUBSCRIBED') setStatus('live');
-    else if (state === 'CHANNEL_ERROR' || state === 'TIMED_OUT') setStatus('error');
-    else if (state === 'CLOSED') setStatus(_enabled ? 'connecting' : 'off');
+    if (state === 'SUBSCRIBED') {
+      setStatus('live');
+      return;
+    }
+    if (state === 'CHANNEL_ERROR' || state === 'TIMED_OUT') {
+      // One quiet retry before admitting defeat. A phone coming back from the
+      // lock screen routinely fails the first attempt because the socket died
+      // while it was away, and showing a red light for that is just wrong.
+      if (attempt < 2 && _enabled && navigator.onLine) {
+        setStatus('connecting');
+        setTimeout(() => {
+          if (_enabled && _boardId === id) join(id, attempt + 1);
+        }, 800 * (attempt + 1));
+      } else {
+        setStatus('error');
+      }
+      return;
+    }
+    if (state === 'CLOSED') setStatus(_enabled ? 'connecting' : 'off');
   });
 }
 

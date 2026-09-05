@@ -237,6 +237,32 @@ class App {
       if (state === 'live') this.syncUI();
     });
 
+    /*
+     * Signing in on a second device is a request to see the work that is
+     * already there, not to keep staring at the blank board this device
+     * happened to open on startup. So when boards arrive and nothing has been
+     * drawn here yet, follow them.
+     *
+     * The guard matters more than the behaviour: a board with anything on it
+     * is never taken away, because the alternative is pulling the page out
+     * from under someone mid-sentence.
+     */
+    cloudSync.onPulled(async () => {
+      try {
+        if (this.store.count > 0) { this.syncUI(); return; }
+        const list = (await window.board.boards.list()) || [];
+        const newest = list.find((b) => b.objects > 0 && b.id !== this.store.doc.id);
+        if (!newest) { this.syncUI(); return; }
+        const doc = await window.board.boards.load(newest.id);
+        if (doc && this.store.count === 0) {
+          await this.loadBoard(doc, { silent: true });
+          this.toast('Opened your synced board', 'check');
+        }
+      } catch (e) {
+        console.warn('[cloud] could not adopt synced board:', e.message);
+      }
+    });
+
     mountSyncUI(this);
   }
 
