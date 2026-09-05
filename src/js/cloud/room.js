@@ -14,7 +14,7 @@
 // a private channel to authorise; the token is what keeps the channel yours.
 
 import { CLIENT_ID } from '../core/store.js';
-import { getClient } from './client.js';
+import { getClient, onAuthChange } from './client.js';
 import { cloudConfigured } from './config.js';
 
 const SAVE_DEBOUNCE_MS = 1200;
@@ -115,6 +115,17 @@ export async function enterRoom(app, token) {
   const c = getClient();
   if (!c) return false;
 
+  /*
+   * Wait for the stored session before asking who we are.
+   *
+   * Joining happens during start-up, well before anything else touches auth,
+   * and the client restores its saved session asynchronously. Ask a moment too
+   * early and the request goes out signed-out: the server answers "not the
+   * owner", perfectly correctly, and the teacher is handed their own lesson as
+   * a student with a read-only board.
+   */
+  try { await c.auth.getSession(); } catch {}
+
   const { data, error } = await c.rpc('gaz_room_read', { p_token: token });
   if (error || !data) {
     app.toast('That lesson link is not valid, or it has expired', 'close');
@@ -144,6 +155,26 @@ export async function enterRoom(app, token) {
   app.toast(_role === 'teacher' ? 'Lesson room open - share the link' : `Joined ${_title}`, 'check');
   return true;
 }
+
+/*
+ * Signing in while already in a room promotes you if the room turns out to be
+ * yours. Someone who follows their own link before the app has finished
+ * remembering them - or who signs in once they are already looking at it -
+ * should not have to reload to get their own board back.
+ */
+onAuthChange(async () => {
+  if (!_token || _role === 'teacher') return;
+  const c = getClient();
+  if (!c) return;
+  try {
+    const { data } = await c.rpc('gaz_room_read', { p_token: _token });
+    if (!data || !data.is_owner) return;
+    _role = 'teacher';
+    if (_channel) { try { _channel.track({ role: _role }); } catch {} }
+    await showSide('teacher', data);
+    _app.toast('This is your lesson - you have the teacher board', 'check');
+  } catch {}
+});
 
 export async function leaveRoom() {
   if (!_token) return;
