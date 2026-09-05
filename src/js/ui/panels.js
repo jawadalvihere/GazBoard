@@ -11,6 +11,8 @@ export function createPanels(app) {
   const title = document.getElementById('panelTitle');
   const body = document.getElementById('panelBody');
   let currentKey = null;
+  // null while browsing; a Set of ids while picking several to delete.
+  let boardSel = null;
   let currentRender = null;
 
   document.getElementById('panelClose').addEventListener('click', close);
@@ -737,15 +739,61 @@ export function createPanels(app) {
 
   /* ---------------- boards ---------------- */
   async function boards() {
-    open('boards', 'My boards', () => h('div', { id: 'boardList' }, h('p', { style: 'color:var(--text-2)' }, 'Loading…')));
+    /*
+     * open() is a toggle - calling it for the panel already on screen closes
+     * it. This function is also how the list refreshes itself after a tick or
+     * a delete, so going through open() every time would shut the panel on the
+     * first tick and take the selection with it. Open only when it is not
+     * already showing; otherwise just redraw the contents.
+     */
+    if (currentKey !== 'boards') {
+      boardSel = null;      // a freshly opened panel always starts unselected
+      open('boards', 'My boards', () => h('div', { id: 'boardList' }, h('p', { style: 'color:var(--text-2)' }, 'Loading…')));
+    }
     const list = await window.board.boards.list();
     const host = document.getElementById('boardList');
     if (!host) return;
     host.innerHTML = '';
-    host.appendChild(h('button', { class: 'btn primary', style: 'width:100%;margin-bottom:8px', onclick: () => { app.command('board.new'); close(); } }, '+ New board'));
-    // Opening a .gazboard file had a keyboard shortcut and nothing to click,
-    // which is no use to anyone who does not already know it is there.
-    host.appendChild(h('button', { class: 'btn', style: 'width:100%;margin-bottom:14px', onclick: () => { app.command('board.open'); close(); } }, 'Open a board file…'));
+
+    const selecting = !!boardSel;
+    if (selecting) {
+      // Drop anything that has since been deleted, so the count never lies.
+      const live = new Set(list.map((b) => b.id));
+      for (const id of [...boardSel]) if (!live.has(id)) boardSel.delete(id);
+    }
+
+    if (selecting) {
+      const n = boardSel.size;
+      const allOn = n > 0 && n === list.length;
+      host.appendChild(h('div', { class: 'board-selbar' },
+        h('button', {
+          class: 'btn',
+          onclick: () => {
+            boardSel = allOn ? new Set() : new Set(list.map((b) => b.id));
+            boards();
+          }
+        }, allOn ? 'Clear all' : 'Select all'),
+        h('button', { class: 'btn', onclick: () => { boardSel = null; boards(); } }, 'Cancel'),
+        h('button', {
+          class: 'btn danger board-delsel',
+          disabled: n === 0,
+          onclick: () => deleteSelected(list)
+        }, n ? `Delete ${n}` : 'Delete')));
+    } else {
+      host.appendChild(h('button', { class: 'btn primary', style: 'width:100%;margin-bottom:8px', onclick: () => { app.command('board.new'); close(); } }, '+ New board'));
+      // Opening a .gazboard file had a keyboard shortcut and nothing to click,
+      // which is no use to anyone who does not already know it is there.
+      host.appendChild(h('button', { class: 'btn', style: 'width:100%;margin-bottom:8px', onclick: () => { app.command('board.open'); close(); } }, 'Open a board file…'));
+      if (list.length > 1) {
+        host.appendChild(h('button', {
+          class: 'btn', style: 'width:100%;margin-bottom:14px',
+          onclick: () => { boardSel = new Set(); boards(); }
+        }, 'Select several…'));
+      } else {
+        host.appendChild(h('div', { style: 'height:6px' }));
+      }
+    }
+
     if (!list.length) host.appendChild(h('p', { style: 'color:var(--text-2);font-size:13px' }, 'No saved boards yet.'));
 
     // Every board this app has ever saved is a plain file in one folder. Showing
@@ -767,19 +815,61 @@ export function createPanels(app) {
       }
     });
     for (const b of list) {
-      const row = h('button', { class: 'board-row' },
-        h('span', { html: icon('board', 20), style: 'color:var(--text-2);display:flex' }),
+      const on = selecting && boardSel.has(b.id);
+      const row = h('button', { class: 'board-row' + (on ? ' selected' : '') },
+        selecting
+          ? h('span', { class: 'board-tick' + (on ? ' on' : ''), html: on ? icon('check', 14) : '' })
+          : h('span', { html: icon('board', 20), style: 'color:var(--text-2);display:flex' }),
         h('span', { class: 'meta' },
           h('b', {}, b.name || 'Untitled board'),
           h('small', {}, `${b.objects} item${b.objects === 1 ? '' : 's'} · ${new Date(b.modified).toLocaleString()}`)),
-        h('span', { class: 'icon-btn', title: 'Delete', html: icon('trash', 16), onclick: async (e) => { e.stopPropagation(); if (await app.confirm('Delete board?', `"${b.name}" will be permanently removed.`, 'Delete')) { await app.deleteBoard(b.id); boards(); } } })
+        selecting
+          ? null
+          : h('span', { class: 'icon-btn', title: 'Delete', html: icon('trash', 16), onclick: async (e) => { e.stopPropagation(); if (await app.confirm('Delete board?', `"${b.name}" will be permanently removed.`, 'Delete')) { await app.deleteBoard(b.id); boards(); } } })
       );
       row.addEventListener('click', async () => {
+        if (selecting) {
+          if (boardSel.has(b.id)) boardSel.delete(b.id); else boardSel.add(b.id);
+          boards();
+          return;
+        }
         const data = await window.board.boards.load(b.id);
         if (data) { await app.loadBoard(data); close(); }
       });
       host.appendChild(row);
     }
+  }
+
+  /**
+   * Delete everything ticked, behind one question rather than one per board.
+   *
+   * The board currently on screen is deleted last and through the app, because
+   * that path is the one that knows to put something else up in its place -
+   * removing it directly would leave the editor pointing at a board that is no
+   * longer there, and the next autosave would write it straight back.
+   */
+  async function deleteSelected(list) {
+    const ids = [...boardSel];
+    if (!ids.length) return;
+
+    const names = list.filter((b) => ids.includes(b.id)).map((b) => b.name || 'Untitled board');
+    const shown = names.slice(0, 4).join(', ') + (names.length > 4 ? `, and ${names.length - 4} more` : '');
+    const ok = await app.confirm(
+      ids.length === 1 ? 'Delete board?' : `Delete ${ids.length} boards?`,
+      `${shown} will be permanently removed. This cannot be undone.`,
+      'Delete');
+    if (!ok) { boards(); return; }
+
+    const openId = app.store.doc.id;
+    for (const id of ids) {
+      if (id === openId) continue;
+      await window.board.boards.remove(id);
+    }
+    if (ids.includes(openId)) await app.deleteBoard(openId);
+
+    boardSel = null;
+    app.toast(`${ids.length} board${ids.length === 1 ? '' : 's'} deleted`);
+    boards();
   }
 
   function refresh() { app.surface.invalidate(); }

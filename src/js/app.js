@@ -114,6 +114,19 @@ class App {
   static ASK_AGAIN_AFTER = 7 * 24 * 60 * 60 * 1000;
 
   constructor() {
+    /*
+     * Decided here, synchronously, from the address bar alone - long before
+     * the room itself has been fetched.
+     *
+     * Joining is asynchronous: it waits for the stored session, then asks the
+     * server who owns the room. An autosave landing anywhere in that window
+     * would write a stray local board, which is how a lesson link used to
+     * leave "Untitled board" behind in My Boards every time it was opened.
+     * The URL is enough to know a room is coming, so nothing local is written
+     * from the very first frame.
+     */
+    this.roomMode = !!room.tokenFromUrl();
+
     this.store = new Store();
     this.settings = this.loadSettings();
     this.surface = new Surface(document.getElementById('c'), this.store, { lowLatency: !!this.settings.lowLatencyInk });
@@ -476,7 +489,10 @@ class App {
       const joined = await room.enterRoom(this, token);
       if (joined) return;
       // A dead or expired link falls through to the normal startup rather than
-      // leaving someone looking at an error with no board.
+      // leaving someone looking at an error with no board. Local saving has to
+      // come back on with it, or they would be left with a board that never
+      // writes itself down.
+      this.roomMode = false;
       this.boardOpenedExplicitly = false;
     }
 
