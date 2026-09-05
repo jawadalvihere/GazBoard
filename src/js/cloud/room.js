@@ -30,6 +30,7 @@ let _outbox = [];
 let _outTimer = null;
 let _saveTimer = null;
 let _applyingRemote = false;
+let _otherPresent = false;
 
 const _subs = new Set();
 
@@ -38,6 +39,22 @@ export function role() { return _role; }
 export function viewing() { return _viewing; }
 export function roomTitle() { return _title; }
 export function isMine() { return _role === _viewing; }
+
+/**
+ * May I draw on the board currently on screen?
+ *
+ * The teacher may write on both sides - marking a student's work in red is
+ * half of what teaching is. The student may only write on their own, so the
+ * teacher's board stays the teacher's.
+ */
+export function canWrite() {
+  if (!_token) return true;
+  if (_role === 'teacher') return true;
+  return _viewing === _role;
+}
+
+/** Is the other person connected right now? */
+export function otherPresent() { return _otherPresent; }
 
 export function onRoomChange(fn) {
   _subs.add(fn);
@@ -116,7 +133,8 @@ export async function enterRoom(app, token) {
 
   app.store.onOp((op) => {
     if (!_token || _applyingRemote) return;
-    if (!isMine()) return;                 // watching, not working
+    if (!canWrite()) return;               // watching, not working
+    if (!isMine() && !_otherPresent) warnUnsaved();
     _outbox.push(op);
     if (!_outTimer) _outTimer = setTimeout(flushOps, 60);
     scheduleSave();
@@ -162,6 +180,9 @@ export async function showSide(side, prefetched = null) {
   _viewing = side;
   const doc = side === 'teacher' ? room.teacher_doc : room.student_doc;
   await _app.loadRoomBoard(doc, side, _title);
+  // Marking someone's work is a different act from writing your own, and it
+  // should look like one without anybody having to remember to change pens.
+  _app.setCorrectionPen(_role === 'teacher' && side === 'student');
   announce();
 }
 
@@ -173,8 +194,24 @@ async function joinChannel() {
   if (_channel) { try { await _channel.unsubscribe(); } catch {} _channel = null; }
 
   _channel = c.channel(`gazroom-${_token}`, {
-    config: { broadcast: { self: false, ack: false } }
+    config: { broadcast: { self: false, ack: false }, presence: { key: CLIENT_ID } }
   });
+
+  // Presence is not decoration here. The board's owner is the only device that
+  // writes it to the server, so a correction made while the student is gone
+  // has nowhere to be saved - and the teacher needs to be told that BEFORE
+  // spending a minute marking, not after.
+  const readPresence = () => {
+    const state = _channel.presenceState() || {};
+    const roles = Object.values(state).flat().map((m) => m && m.role);
+    const other = _role === 'teacher' ? 'student' : 'teacher';
+    const was = _otherPresent;
+    _otherPresent = roles.includes(other);
+    if (was !== _otherPresent) announce();
+  };
+  _channel.on('presence', { event: 'sync' }, readPresence);
+  _channel.on('presence', { event: 'join' }, readPresence);
+  _channel.on('presence', { event: 'leave' }, readPresence);
 
   _channel.on('broadcast', { event: 'ops' }, (msg) => {
     const p = msg?.payload;
@@ -191,9 +228,17 @@ async function joinChannel() {
     try { _app.store.applyRemote(p.ops); }
     catch (e) { console.warn('[room] could not apply:', e.message); }
     finally { _applyingRemote = false; }
+
+    // This board is mine, so I am the one that writes it to the server - and
+    // that includes what the other person just drew on it. applyRemote does
+    // not fire the op channel, so nothing else would schedule this and a
+    // teacher's corrections would live only on screen.
+    if (isMine()) scheduleSave();
   });
 
-  _channel.subscribe();
+  _channel.subscribe((state) => {
+    if (state === 'SUBSCRIBED') _channel.track({ role: _role }).catch(() => {});
+  });
 }
 
 function flushOps() {
@@ -207,7 +252,9 @@ function flushOps() {
       event: 'ops',
       // The page rides along so a watcher on page 1 is not left staring at a
       // blank sheet while the work happens on page 3.
-      payload: { c: CLIENT_ID, side: _role, page: _app.currentPageIndex(), ops }
+      // The side being DRAWN ON, which is not always mine: a teacher
+      // correcting in red is writing on the student's board.
+      payload: { c: CLIENT_ID, side: _viewing, page: _app.currentPageIndex(), ops }
     });
   } catch (e) {
     console.warn('[room] broadcast failed:', e.message);
@@ -224,6 +271,16 @@ export function notePage(index) {
   try {
     _channel.send({ type: 'broadcast', event: 'ops', payload: { c: CLIENT_ID, side: _role, page: index, ops: [] } });
   } catch {}
+}
+
+let _warnedAt = 0;
+
+/** Say it once, not on every stroke. */
+function warnUnsaved() {
+  const now = Date.now();
+  if (now - _warnedAt < 20000) return;
+  _warnedAt = now;
+  _app.toast('The student is not connected - these marks will not be saved', 'close', 4200);
 }
 
 /* ---------------- durable copy ---------------- */

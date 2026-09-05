@@ -46,10 +46,7 @@ function render() {
     tab('teacher', 'Teacher'),
     tab('student', 'Student')));
 
-  _bar.appendChild(h('div', { class: 'room-state' },
-    room.isMine()
-      ? 'Your board'
-      : h('span', {}, h('span', { class: 'room-live' }), `Watching — ${viewing === 'teacher' ? 'teacher' : 'student'} is drawing`)));
+  _bar.appendChild(h('div', { class: 'room-state' }, stateLine()));
 
   if (mine === 'teacher') {
     _bar.appendChild(h('button', {
@@ -57,6 +54,34 @@ function render() {
       onclick: () => shareDialog(room.roomLink())
     }, 'Share link'));
   }
+}
+
+/**
+ * The line that says what you are doing and whether it will survive.
+ *
+ * The warning case is the one that earns its place: the board's owner is the
+ * only device that saves it, so marking a student's board while she is not
+ * connected writes into nothing. Better to say so before the marking than to
+ * let it quietly disappear.
+ */
+function stateLine() {
+  const marking = room.role() === 'teacher' && room.viewing() === 'student';
+
+  if (marking && !room.otherPresent()) {
+    return h('span', { class: 'room-warn' },
+      h('span', { class: 'room-warn-dot' }),
+      'Student is not connected — marks made now will not be saved');
+  }
+  if (marking) {
+    return h('span', {}, h('span', { class: 'room-live' }), 'Marking in red — she sees this live');
+  }
+  if (room.isMine()) {
+    return room.otherPresent()
+      ? h('span', {}, h('span', { class: 'room-live' }), 'Your board — the other side is connected')
+      : 'Your board';
+  }
+  return h('span', {}, h('span', { class: 'room-live' }),
+    `Watching — ${room.viewing() === 'teacher' ? 'teacher' : 'student'} is drawing`);
 }
 
 /* ---------------- starting and sharing a room ---------------- */

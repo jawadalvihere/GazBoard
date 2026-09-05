@@ -584,7 +584,39 @@ class App {
    * drawing on somebody else's page with nowhere for the ink to go.
    */
   get readOnly() {
-    return !!this.roomMode && !room.isMine();
+    return !!this.roomMode && !room.canWrite();
+  }
+
+  /**
+   * Swap to a red pen while marking the student's board, and put the old one
+   * back afterwards.
+   *
+   * The previous pen is only restored if the correction red is still selected:
+   * if you deliberately picked another colour while marking, that was a choice,
+   * and quietly reverting it would be the app arguing with you.
+   */
+  setCorrectionPen(on) {
+    const RED = '#d13438';
+    if (on) {
+      if (!this._penBeforeMarking) {
+        this._penBeforeMarking = {
+          color: this.settings.penColor, effect: this.settings.penEffect, tool: this.tool
+        };
+      }
+      this.settings.penColor = RED;
+      this.settings.penEffect = 'none';
+      this.setTool('pen');
+    } else if (this._penBeforeMarking) {
+      const prev = this._penBeforeMarking;
+      this._penBeforeMarking = null;
+      if (this.settings.penColor === RED) {
+        this.settings.penColor = prev.color;
+        this.settings.penEffect = prev.effect;
+        this.setTool(prev.tool);
+      }
+    }
+    // Deliberately not saved: the marking pen is a mode, not a preference.
+    this.syncUI();
   }
 
   /** Show one side of a lesson room. Never touches the local board list. */
