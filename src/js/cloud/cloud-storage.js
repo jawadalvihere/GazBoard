@@ -68,6 +68,32 @@ function notify(reason) {
   }
 }
 
+/**
+ * The cloud copy of a board carries no camera.
+ *
+ * Where you are looking is a property of the device, not of the board. A phone
+ * held in portrait and a laptop in landscape want completely different pan and
+ * zoom for the same drawing, so handing one device's viewport to the other
+ * drops it somewhere that makes no sense - and the ink you just drew appears
+ * to have vanished, because it is off the edge of a view you never chose.
+ */
+function forCloud(doc) {
+  if (!doc) return doc;
+  const { camera, ...rest } = doc;
+  return rest;
+}
+
+/** Write a board that came from another device, keeping this one's viewpoint. */
+async function saveIncoming(remoteDoc) {
+  if (!remoteDoc || !remoteDoc.id) return false;
+  let doc = remoteDoc;
+  try {
+    const mine = await local.loadBoard(remoteDoc.id);
+    if (mine && mine.camera) doc = { ...remoteDoc, camera: mine.camera };
+  } catch {}
+  return local.saveBoard(doc);
+}
+
 /* ---------------- boards ---------------- */
 
 export async function saveBoard(payload) {
@@ -146,7 +172,7 @@ export async function flushPush() {
         id: doc.id,
         owner: _userId,
         name: doc.name || 'Untitled board',
-        doc,
+        doc: forCloud(doc),
         thumb: doc.thumb || null,
         objects: Array.isArray(doc.order) ? doc.order.length : Object.keys(doc.objects || {}).length,
         modified: doc.modified || Date.now(),
@@ -183,7 +209,7 @@ export async function ensureBoardRow(doc) {
       id: doc.id,
       owner: _userId,
       name: doc.name || 'Untitled board',
-      doc,
+      doc: forCloud(doc),
       thumb: doc.thumb || null,
       objects: Array.isArray(doc.order) ? doc.order.length : Object.keys(doc.objects || {}).length,
       modified: doc.modified || Date.now(),
@@ -208,7 +234,7 @@ export async function pullOne(id) {
     const { data, error } = await c.from('gaz_boards')
       .select('doc, deleted').eq('id', id).eq('owner', _userId).maybeSingle();
     if (error || !data || data.deleted) return null;
-    await local.saveBoard(data.doc);
+    await saveIncoming(data.doc);
     return data.doc;
   } catch {
     return null;
@@ -240,7 +266,7 @@ export async function pullAll() {
         continue;
       }
       if (here === undefined || (row.modified || 0) > here) {
-        await local.saveBoard(row.doc);
+        await saveIncoming(row.doc);
         changed++;
       }
     }

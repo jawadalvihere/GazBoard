@@ -18,6 +18,7 @@ import { icon } from './ui/icons.js';
 import { PENS } from './ui/palettes.js';
 import { exportPng, exportSvg, exportPdf, saveBoardFile, openBoardFile, exportable } from './export.js';
 import { boardThumb } from './ui/thumb.js';
+import { pageWorldSize } from './ui/pdfdialog.js';
 import {
   pickAndInsertDocument, pickAndInsertImage, insertDocument,
   insertImagesFromPaths, insertImageFiles, dropOrigin, isImagePath, isDocPath
@@ -33,6 +34,12 @@ const DEFAULT_SETTINGS = {
   noteColor: '#ffd94a', noteSize: 200, noteFont: 'hand',
   textColor: '#201f1e', textSize: 32, textFont: 'hand',
   shapeKind: 'rect', shapeStroke: '#201f1e', shapeFill: 'none', shapeLineWidth: 3, shapeDash: null,
+  // A new board is a sheet rather than unbounded space. Two screens of
+  // different shapes share no frame of reference on an infinite canvas -
+  // "the same view" is not a thing you can define - so ink drawn on a phone
+  // lands off the edge of a laptop and reads as lost. A fixed sheet gives both
+  // devices the same rectangle to fit. Set to 'infinite' for the old default.
+  defaultPaper: 'a4', defaultOrientation: 'portrait',
   inkToShape: false, pressure: true, wheelZoom: false, returnToSelect: true, autosave: true,
   edgePan: true, importQuality: 2, lowLatencyInk: false, laserColor: '#ff2d2d', showToolKeys: true,
   rightDragPans: true, hintsSeen: {},
@@ -528,8 +535,11 @@ class App {
    */
   newBoard(silent = false) {
     this.store.reset();
+    this.applyDefaultPage();
     this.surface.selection.clear();
-    this.openAtActualSize();
+    // A sheet wants to be seen whole - that is the entire point of having one.
+    if (this.pageCount) this.fitToPage(0);
+    else this.openAtActualSize();
     document.getElementById('boardTitle').value = this.store.doc.name;
     this.syncUI();
     this.surface.invalidate();
@@ -539,6 +549,23 @@ class App {
     window.board.boards.setLast(this.store.doc.id);
     // kept so callers (and the suite) can wait for the board to be on disk
     this.pendingWrite = silent ? Promise.resolve() : this.persist({ force: true });
+  }
+
+  /**
+   * Put the default sheet on a board that has just been reset.
+   *
+   * Written straight onto the fresh document rather than committed as an op:
+   * the page is part of what a new board IS, not something that was done to
+   * it, so it should not sit on the undo stack waiting for a stray Ctrl+Z to
+   * turn the board back into an infinite canvas.
+   */
+  applyDefaultPage() {
+    const paper = this.settings.defaultPaper;
+    if (!paper || paper === 'infinite') return;
+    const size = pageWorldSize(paper, this.settings.defaultOrientation || 'portrait');
+    if (!size) return;
+    this.store.doc.pages = [{ w: size.w, h: size.h }];
+    this.store.rev++;
   }
 
   /**
@@ -1306,6 +1333,10 @@ class App {
 
     if (paperId === 'infinite' || !paperId) {
       this.store.setPages([], 'infinite canvas');
+      // What you chose last is what a new board starts as, so nobody has to
+      // find a separate setting to make the choice stick.
+      this.settings.defaultPaper = 'infinite';
+      this.saveSettings();
       this.toast('Infinite canvas');
       this.surface.invalidate();
       this.syncUI();
@@ -1323,6 +1354,8 @@ class App {
 
     this.settings.pageOrientation = orientation;
     this.settings.pagePaper = paperId;
+    this.settings.defaultPaper = paperId;
+    this.settings.defaultOrientation = orientation;
     this.saveSettings();
     this.store.commit('page size', ops);
     this.fitToPage(Math.min(this.currentPageIndex(), count - 1));
