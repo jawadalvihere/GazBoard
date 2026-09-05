@@ -156,6 +156,19 @@ export class Interaction {
     }
     if (this.pointers.size > 2) return;
 
+    /*
+     * Watching the other person's board in a lesson room.
+     *
+     * Refused here rather than at the top of onDown, because everything above
+     * this line is gesture bookkeeping - the pointer still has to be recorded
+     * so that a second finger can reach the pinch and page-turn branch. It is
+     * the tools, and only the tools, that are inert while watching.
+     */
+    if (this.app.readOnly) {
+      this.app.noteReadOnly();
+      return;
+    }
+
     // commit first: committing hands the board back to the pen, and the tool
     // must be resolved after that or the first stylus touch after typing runs
     // the old tool

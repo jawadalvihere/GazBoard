@@ -54,6 +54,51 @@ export async function exportPng(app, { scale = 2, transparent = false, selection
   return filePath;
 }
 
+const two = (n) => String(n).padStart(2, '0');
+
+/** `2026-09-05 1432` - sortable, and readable in a photo roll. */
+function stamp(d = new Date()) {
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} `
+       + `${two(d.getHours())}${two(d.getMinutes())}`;
+}
+
+/**
+ * Save the page you are looking at as a PNG, in one tap.
+ *
+ * Deliberately not the export dialog. This is the thing you reach for in the
+ * middle of a lesson to keep what is on the board before wiping it, and being
+ * asked about scale and transparency at that moment is three taps in the way.
+ *
+ * "The current page" needs no special case: exportBounds() already resolves to
+ * the current sheet whenever the board is a pad, and falls back to whatever
+ * has been drawn when it is not.
+ */
+export async function capturePage(app, { scale = 2 } = {}) {
+  const box = exportBounds(app);
+  const maxPx = 12000;
+  const s = Math.min(scale, maxPx / Math.max(box.w, box.h));
+  const canvas = app.surface.renderTo(box, s, true);
+  const blob = await new Promise((res) => canvas.toBlob(res, 'image/png'));
+  if (!blob) { app.toast('Could not capture the page', 'close'); return null; }
+
+  const page = app.pageCount > 1 ? ` p${app.currentPageIndex() + 1}` : '';
+  const defaultPath = `${safeName(app.store.doc.name)}${page} ${stamp()}.png`;
+
+  // On the desktop this puts up a save dialog, which is what you want when
+  // there is a filesystem to aim at. In the browser it hands the name straight
+  // back and the write below becomes a download, so a phone stays one tap.
+  const filePath = await window.board.saveDialog({
+    title: 'Save page as PNG',
+    defaultPath,
+    filters: [{ name: 'PNG image', extensions: ['png'] }]
+  });
+  if (!filePath) return null;
+
+  await window.board.writeFile(filePath, await blob.arrayBuffer());
+  app.toast('Saved ' + String(filePath).split(/[\\/]/).pop(), 'camera');
+  return filePath;
+}
+
 export async function exportSvg(app) {
   const box = exportBounds(app);
   const svg = buildSvg(app, box);

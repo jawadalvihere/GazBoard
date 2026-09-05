@@ -581,3 +581,47 @@ kbd {
   color: var(--accent-2);
   background: color-mix(in srgb, var(--accent-2) 12%, transparent);
 }
+
+/* ---------------- lesson room ---------------- */
+
+#roomBar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 12px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--stroke);
+  flex-shrink: 0;
+}
+.room-tabs { display: flex; gap: 4px; }
+.room-tab {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 14px; border-radius: 6px;
+  font-size: 13px; color: var(--text-2);
+  border: 1px solid transparent;
+}
+.room-tab:hover { background: var(--surface); }
+.room-tab.active {
+  background: var(--surface); color: var(--text);
+  border-color: var(--stroke-2); font-weight: 600;
+}
+.room-you {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
+  padding: 1px 5px; border-radius: 10px;
+  background: var(--accent-2); color: #fff;
+}
+.room-state { font-size: 12px; color: var(--text-2); display: flex; align-items: center; gap: 6px; }
+/* A dot that breathes, so "live" is visible without a word for it. */
+.room-live {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: #0b6a0b; margin-right: 5px;
+  animation: room-pulse 1.6s ease-in-out infinite;
+}
+@keyframes room-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+.room-share { margin-left: auto; }
+
+@media (max-width: 480px) {
+  #roomBar { padding: 5px 8px; gap: 6px; }
+  .room-tab { padding: 5px 10px; font-size: 12.5px; }
+  /* The running commentary is the first thing to go when there is no room. */
+  .room-state { display: none; }
+  .room-share { padding: 5px 10px; font-size: 12.5px; }
+}

@@ -109,6 +109,7 @@ export function initToolbar(app) {
     ['btnBoards', 'board', () => app.panels.boards()],
     ['btnTemplates', 'template', () => app.panels.templates()],
     ['btnBackground', 'palette', () => app.panels.background()],
+    ['btnCapture', 'camera', () => app.command('capturePage')],
     ['btnExport', 'export', (e) => openExportPopover(app, e.currentTarget)],
     ['btnSettings', 'settings', () => app.panels.settings()],
     ['btnHelp', 'help', () => app.showShortcuts()]
@@ -375,6 +376,9 @@ export function openMorePopover(app, anchor) {
     menuItem('Templates…', 'template', () => app.panels.templates()),
     menuItem('Format background…', 'palette', () => app.panels.background()),
     menuItem(app.ruler.visible ? 'Hide ruler' : 'Show ruler', 'ruler', () => app.command('ruler'), { key: 'Ctrl+R' }),
+    h('div', { class: 'menu-sep' }),
+    menuItem('Teach with a student…', 'board', () => app.command('room.start')),
+    menuItem('Save this page as a picture', 'camera', () => app.command('capturePage')),
     h('div', { class: 'menu-sep' }),
     menuItem('Select all', 'select', () => app.command('edit.selectAll'), { key: 'Ctrl+A' }),
     menuItem('Export as PNG…', 'export', () => app.command('export.png')),

@@ -16,7 +16,7 @@ import { showContextMenu, updateSelectionBar } from './ui/contextmenu.js';
 import { closePopover, popoverOpen, h } from './ui/popover.js';
 import { icon } from './ui/icons.js';
 import { PENS } from './ui/palettes.js';
-import { exportPng, exportSvg, exportPdf, saveBoardFile, openBoardFile, exportable } from './export.js';
+import { exportPng, exportSvg, exportPdf, capturePage, saveBoardFile, openBoardFile, exportable } from './export.js';
 import { boardThumb } from './ui/thumb.js';
 import { pageWorldSize } from './ui/pdfdialog.js';
 import {
@@ -24,6 +24,8 @@ import {
   insertImagesFromPaths, insertImageFiles, dropOrigin, isImagePath, isDocPath
 } from './insert.js';
 import * as cloudSync from './cloud/sync.js';
+import * as room from './cloud/room.js';
+import { mountRoomUI, startRoom } from './cloud/room-ui.js';
 import { mountSyncUI } from './cloud/ui.js';
 
 const DEFAULT_SETTINGS = {
@@ -275,6 +277,7 @@ class App {
     });
 
     mountSyncUI(this);
+    mountRoomUI(this);
   }
 
   /** True while a pointer gesture is mid-flight. Reads one flag; never the board. */
@@ -314,6 +317,10 @@ class App {
    * single launch. `force` is for an explicit "save" the user asked for.
    */
   async persist({ force = false } = {}) {
+    // A lesson room's boards belong to the room, not to this device. Writing
+    // them into the local board list would fill it with copies of every lesson
+    // and push them up as if they were the teacher's own boards.
+    if (this.roomMode) return;
     if (!force && this.unsavedNew && !this.store.objects.length) return;
     this.store.doc.camera = this.surface.cam.toJSON();
     // boards.save writes the file and records the "last open" pointer in one go,
@@ -458,6 +465,22 @@ class App {
    */
   async restoreLastBoard() {
     /*
+     * A share link wins over everything else. Someone who followed a lesson
+     * link wants that lesson, not whatever this browser happened to have open
+     * last - and on a student's phone the board it had open is very often
+     * nothing at all.
+     */
+    const token = room.tokenFromUrl();
+    if (token) {
+      this.boardOpenedExplicitly = true;
+      const joined = await room.enterRoom(this, token);
+      if (joined) return;
+      // A dead or expired link falls through to the normal startup rather than
+      // leaving someone looking at an error with no board.
+      this.boardOpenedExplicitly = false;
+    }
+
+    /*
      * Double-clicking a .gazboard file starts the app AND asks it to restore
      * whatever was open last, and those two race. The file arrives first and
      * appears on screen; a moment later the resume finishes and quietly loads
@@ -553,6 +576,53 @@ class App {
     window.board.boards.setLast(this.store.doc.id);
     // kept so callers (and the suite) can wait for the board to be on disk
     this.pendingWrite = silent ? Promise.resolve() : this.persist({ force: true });
+  }
+
+  /**
+   * True while the board on screen belongs to the other person in a lesson
+   * room. Watching, not working - the pen has to be inert, or you would be
+   * drawing on somebody else's page with nowhere for the ink to go.
+   */
+  get readOnly() {
+    return !!this.roomMode && !room.isMine();
+  }
+
+  /** Show one side of a lesson room. Never touches the local board list. */
+  async loadRoomBoard(doc, side, title) {
+    this.surface.selection.clear();
+    this.commitTextEdit();
+
+    if (doc && (doc.objects || doc.order)) this.store.load(doc);
+    else { this.store.reset(`${title} - ${side}`); this.applyDefaultPage(); }
+
+    // Never "unsaved new" in the local sense: persist() is switched off in
+    // room mode and the room writes its own copy.
+    this.unsavedNew = false;
+    this._unsaved = false;
+
+    if (this.pageCount) this.fitToPage(0); else this.openAtActualSize();
+    document.getElementById('boardTitle').value =
+      `${title} - ${side === 'teacher' ? 'Teacher' : 'Student'}`;
+    this.surface.invalidate();
+    this.syncUI();
+  }
+
+  /** Say why the pen did nothing - once, not on every touch. */
+  noteReadOnly() {
+    const now = performance.now();
+    if (this._roMsgAt && now - this._roMsgAt < 4000) return;
+    this._roMsgAt = now;
+    this.toast('This is the other person’s board — switch tabs to draw on yours', 'lock');
+  }
+
+  /** The document to hand the room, with pictures pulled out as assets. */
+  async roomDocForSave() {
+    // Same rule as an ordinary synced board: the camera belongs to the device
+    // looking, not to the document. It matters more here, because on a room
+    // board with no sheet to fit, openAtActualSize() would otherwise drop you
+    // straight into wherever the other person's phone happened to be pointing.
+    const { camera, ...doc } = await this.externaliseAssets(this.store.toJSON());
+    return doc;
   }
 
   /**
@@ -1077,6 +1147,8 @@ class App {
       case 'page.next': this.nextPage(); break;
       case 'page.prev': this.prevPage(); break;
       case 'lockView': case 'view.lock': this.toggleViewLock(); break;
+      case 'capturePage': capturePage(this).catch((e) => this.toast('Could not save the page', 'close')); break;
+      case 'room.start': startRoom(this); break;
       case 'page.fitContent': this.fitContentToPage(); break;
       case 'board.save': saveBoardFile(this); break;
       case 'board.open': openBoardFile(this); break;
@@ -1518,6 +1590,7 @@ class App {
     if (!this.pageCount) return;
     const i = clamp(index, 0, this.pageCount - 1);
     this.fitToPage(i);
+    if (this.roomMode) room.notePage(i);
     this.syncUI();
   }
 

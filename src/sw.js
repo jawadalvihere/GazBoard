@@ -45,6 +45,8 @@ const PRECACHE_ASSETS = [
   './js/cloud/client.js',
   './js/cloud/cloud-storage.js',
   './js/cloud/sync.js',
+  './js/cloud/room.js',
+  './js/cloud/room-ui.js',
   './js/cloud/ui.js',
   './js/platform/platform.js',
   './js/platform/web-adapter.js',
