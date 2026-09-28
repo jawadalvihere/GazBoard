@@ -60,7 +60,7 @@ const BOARD = {
  * while the tests run. Discovery is exercised separately; these are wired by
  * address so a test machine never shouts at its own network.
  */
-async function pair() {
+async function pair(opts = {}) {
   const aStore = memoryStore(), bStore = memoryStore();
   const arrivals = [];
   let verdict = () => 'kept-both';
@@ -73,6 +73,8 @@ async function pair() {
   const B = createSyncNode({
     deviceId: P.newDeviceId(), deviceName: 'Classroom tablet', paired: bStore,
     host: '127.0.0.1', broadcast: '127.0.0.1', discoveryPort: 0,
+    // B is the one boards are sent TO, so it is B that reports them arriving.
+    onReceiving: opts.onReceiving || (() => {}),
     onBoard: async (msg) => { arrivals.push(msg); return verdict(msg); }
   });
 
@@ -600,8 +602,9 @@ async function run() {
     // is wrong, and wrong on the machine of somebody who cannot tell you.
     const fallback = panels.slice(panels.indexOf("}[fw.tool] ||"), panels.indexOf("}[fw.tool] ||") + 60);
     check('and falls back to a generic word, never to one platform\'s product',
-      /\|\| 'the firewall'/.test(fallback)
-      && !/\|\| 'Windows Firewall'/.test(fallback) && !/\|\| 'the macOS/.test(fallback),
+      // the generic word may be wrapped for translation: t('the firewall')
+      /\|\| (t\()?'the firewall'/.test(fallback)
+      && !/\|\| (t\()?'Windows Firewall'/.test(fallback) && !/\|\| (t\()?'the macOS/.test(fallback),
       fallback.split('\n')[0]);
 
     // Windows says its own name rather than being the thing left over.
@@ -866,6 +869,648 @@ async function run() {
    * whether the whitelist would carry it. It costs nothing and it catches the
    * next root-level module before it reaches an installer.
    */
+
+  /*
+   * Announcements do not have to travel both ways.
+   *
+   * A firewall on one machine, a wifi that keeps its clients apart, two
+   * subnets that do not carry broadcasts to each other - any of these leaves
+   * one computer seeing the other in its list while the other sees nothing at
+   * all. The one that sees nothing had no address, so no Send button, and no
+   * way to answer a board it had just been handed.
+   *
+   * But the machine that reached us made a connection to do it, and the
+   * address it came from is reachable by definition.
+   */
+  await section('a computer that reached us keeps its address', async () => {
+    const t = await pair();
+    try {
+      const showing = t.B.beginPairing();
+      await t.A.pairWith(t.peerB, showing.code);
+
+      const asB = t.bStore.all()[0];
+      check('the machine that was paired WITH writes down where the other one called from',
+        !!asB && asB.lastAddress === '127.0.0.1' && asB.lastPort === t.A.port,
+        `${asB && asB.lastAddress}:${asB && asB.lastPort}, and it listens on ${t.A.port}`);
+
+      // The point of writing it down: B never discovered A, and can still send.
+      const reply = await t.B.send({ deviceId: asB.deviceId, name: asB.name },
+        { id: 'reply-1', name: 'Sent back', objects: [] });
+      check('and can send to it without ever having seen it announce itself',
+        !!reply && reply.accepted === true, JSON.stringify(reply));
+
+      // The initiator keeps the address it dialled, for the same reason.
+      const asA = t.aStore.all()[0];
+      check('and the machine that did the pairing keeps the address it dialled',
+        !!asA && asA.lastAddress === '127.0.0.1' && asA.lastPort === t.B.port,
+        `${asA && asA.lastAddress}:${asA && asA.lastPort}`);
+
+      // Nothing to go on at all is still a sentence, not a crash.
+      let nothing = '';
+      try {
+        await t.B.send({ deviceId: 'a-device-nobody-has-met', name: 'Ghost' }, { id: 'x', objects: [] });
+      } catch (e) { nothing = e.message; }
+      check('and a device it was never paired with is refused in words',
+        /not paired/i.test(nothing), nothing);
+    } finally { await t.stop(); }
+  });
+
+  /*
+   * "connect ENETUNREACH 10.0.5.12:53318" is what a teacher was shown when a
+   * send failed. Every one of these codes means something different about what
+   * to try next, and none of them means anything to the person reading it.
+   */
+  await section('a failed send says what went wrong in words', async () => {
+    const t = await pair();
+    try {
+      const showing = t.B.beginPairing();
+      await t.A.pairWith(t.peerB, showing.code);
+      const asA = t.aStore.all()[0];
+
+      let refused = '';
+      try {
+        // Port 1: nothing is listening there, and the kernel says so at once.
+        await t.A.send({ deviceId: asA.deviceId, name: asA.name, address: '127.0.0.1', port: 1 },
+          { id: 'nope', objects: [] });
+      } catch (e) { refused = e.message; }
+      check('a closed port is explained rather than reported',
+        /nothing is listening/i.test(refused) && !/ECONNREFUSED/.test(refused), refused);
+      check('and it names the address it could not get to',
+        /127\.0\.0\.1:1/.test(refused), refused);
+    } finally { await t.stop(); }
+  });
+
+  /*
+   * The address a computer gives itself when nothing answers.
+   *
+   * When an adapter asks the network for an address and gets silence, it makes
+   * one up starting 169.254. Two laptops joined by one ethernet cable with no
+   * router both land here and reach each other perfectly well - so this is not
+   * a broken address and it is never thrown away.
+   *
+   * What it must not do is win. A desktop with wifi plus an unplugged network
+   * port has one of these sitting beside a real address, and it cost a real
+   * afternoon: the invented one got announced, every machine wrote it down,
+   * and every send failed with "cannot reach" while a plain ping to the real
+   * address worked - which made it look like GazBoard's fault.
+   */
+  await section('an invented address is ranked last, never thrown away', async () => {
+    const os = require('node:os');
+    const { localAddresses } = require('../sync/node.js');
+    const realInterfaces = os.networkInterfaces;
+
+    // Two laptops on one cable have nothing else. It has to still work.
+    const t = await pair();
+    try {
+      const found = await t.A.addByAddress('127.0.0.1', t.B.port);
+      check('an address typed by hand is still dialled, whatever it looks like',
+        !!found && found.name === 'Classroom tablet', found && found.name);
+    } finally { await t.stop(); }
+
+    // A machine with both: the one everybody can reach goes first, and the
+    // other is marked rather than hidden.
+    os.networkInterfaces = () => ({
+      'Ethernet': [{ family: 'IPv4', internal: false, address: '169.254.108.4', netmask: '255.255.0.0' }],
+      'Wi-Fi': [{ family: 'IPv4', internal: false, address: '10.16.4.21', netmask: '255.255.255.0' }],
+      'Loopback': [{ family: 'IPv4', internal: true, address: '127.0.0.1', netmask: '255.0.0.0' }]
+    });
+    const both = localAddresses();
+    check('the address everybody can reach is offered first',
+      both.length === 2 && both[0].address === '10.16.4.21',
+      both.map((a) => a.address).join(', '));
+    check('and the invented one is still listed, marked for what it is',
+      both[1].address === '169.254.108.4' && both[1].selfAssigned === true
+      && both[0].selfAssigned !== true);
+
+    // ...and a machine that has nothing else is not left with a blank panel.
+    os.networkInterfaces = () => ({
+      'Ethernet': [{ family: 'IPv4', internal: false, address: '169.254.108.4', netmask: '255.255.0.0' }]
+    });
+    const only = localAddresses();
+    check('a laptop on a direct cable is shown the address it actually has',
+      only.length === 1 && only[0].address === '169.254.108.4',
+      only.map((a) => a.address).join(', '));
+
+    os.networkInterfaces = realInterfaces;
+  });
+
+  /*
+   * What PowerShell writes when nobody is watching.
+   *
+   * With its output going to a pipe rather than a console, PowerShell does not
+   * print errors as text. It prints CLIXML - a wrapper starting "#< CLIXML"
+   * with the message buried in XML and the line breaks spelled _x000D__x000A_.
+   *
+   * That went straight onto the sharing panel of a classroom PC, so instead of
+   * "you are not an administrator on this computer" its owner was shown a
+   * screenful of angle brackets and reasonably assumed GazBoard had broken.
+   */
+  /*
+   * The building network, which is where the ranking rule was not enough.
+   *
+   * A PC with a wired port that gets no address and wifi that does announces
+   * out of BOTH. On a university floor the wired broadcast reaches everything
+   * on that cabling carrying a useless 169.254 source, while the wifi
+   * broadcast never crosses to the wired side at all. So the listener sees
+   * exactly ONE announcement, from the address that cannot be dialled, and no
+   * better one is ever coming to replace it - the ranking rule needs two
+   * addresses to choose between and only ever gets the wrong one.
+   *
+   * So an announcement now carries the addresses outright. However the packet
+   * travelled, what it CARRIES is what gets dialled.
+   */
+  await section('an announcement says where to find the machine, not just that it exists', async () => {
+    const t = await pair();
+    try {
+      const say = (extra) => ({ t: 'gazboard', v: P.PROTOCOL, id: 'far-away',
+        name: 'Classroom PC', port: 53318, ...extra });
+
+      // Exactly the classroom case: it arrives from the invented address, and
+      // names the real one.
+      t.A._notePeer(say({ a: ['10.10.113.81'] }), '169.254.151.8');
+      const seen = t.A._list().find((p) => p.deviceId === 'far-away');
+      check('the address it named is the one offered, not the one it arrived from',
+        !!seen && seen.address === '10.10.113.81', seen && seen.address);
+      check('and the arrival address is kept behind it as a fallback',
+        !!seen && seen.addresses.includes('169.254.151.8'), (seen && seen.addresses || []).join(', '));
+
+      // An older version sends no addresses at all. Nothing may change for it.
+      t.A._notePeer(say({ id: 'old-version', name: 'Older GazBoard' }), '10.10.113.99');
+      const old = t.A._list().find((p) => p.deviceId === 'old-version');
+      check('a version that names none still works exactly as before',
+        !!old && old.address === '10.10.113.99', old && old.address);
+
+      /*
+       * The case that must NOT change: a machine with two working-looking
+       * addresses whose announcement already arrives fine.
+       *
+       * A desktop with Hyper-V names its virtual switch address alongside its
+       * real one, and os.networkInterfaces() may well put the virtual one
+       * first. If a named address outranked the one the packet came from, a
+       * home setup that has worked for months would start dialling a switch
+       * address that reaches nowhere - breaking the working case to fix the
+       * broken one.
+       *
+       * So the arrival address wins whenever it is not invented. It is the
+       * only address we have evidence about: a packet came from it.
+       */
+      t.A._notePeer(say({ id: 'virtual-host', name: 'Home desktop',
+        a: ['172.23.160.1', '192.168.0.5'] }), '192.168.0.5');
+      const virt = t.A._list().find((p) => p.deviceId === 'virtual-host');
+      check('an address that already worked keeps being used, not a named one',
+        !!virt && virt.address === '192.168.0.5', virt && virt.address);
+      check('and the virtual switch address is kept only as a fallback',
+        !!virt && virt.addresses.indexOf('192.168.0.5') === 0
+        && virt.addresses.includes('172.23.160.1'), (virt && virt.addresses || []).join(', '));
+
+      // Same machine, but its announcement reaches us from the invented
+      // address. NOW there is no evidence, and a named one is all there is.
+      t.A._notePeer(say({ id: 'no-evidence', name: 'Classroom PC',
+        a: ['172.23.160.1', '10.10.113.81'] }), '169.254.151.8');
+      const none = t.A._list().find((p) => p.deviceId === 'no-evidence');
+      check('a named address is used only when the arrival address is invented',
+        !!none && none.address === '172.23.160.1', none && none.address);
+      check('with the invented one behind it, and the knock to sort them out',
+        !!none && none.addresses.includes('10.10.113.81')
+        && none.addresses.includes('169.254.151.8'), (none && none.addresses || []).join(', '));
+    } finally { await t.stop(); }
+  });
+
+  /*
+   * Which of them actually answers.
+   *
+   * Ranking is a guess and some guesses look perfect. A Hyper-V switch hands
+   * its host a 172.x that passes every test for a real address and is
+   * reachable from nowhere at all. Rather than reason harder, ask them all and
+   * believe whichever replies.
+   */
+  await section('the address that answers is the one used', async () => {
+    const t = await pair();
+    try {
+      const showing = t.B.beginPairing();
+      // Two addresses: one with nothing on it, and the one B is really on.
+      // Port 1 is refused instantly, so this does not wait on a timeout.
+      const reached = await t.A.pairWith(
+        { deviceId: t.peerB.deviceId, name: t.peerB.name,
+          address: '127.0.0.1', port: t.B.port,
+          addresses: ['127.0.0.1'] }, showing.code);
+      check('pairing still works when there is only one address to try',
+        !!reached && !!reached.deviceId && !!reached.fingerprint, reached && reached.name);
+
+      const asA = t.aStore.all()[0];
+      const board = { id: 'b1', name: 'Board', objects: [] };
+      const ok = await t.A.send({ deviceId: asA.deviceId, name: asA.name,
+        address: '203.0.113.9', port: t.B.port,
+        addresses: ['203.0.113.9', '127.0.0.1'] }, board);
+      check('and a send walks past an address that does not answer to one that does',
+        !!ok && ok.accepted === true, JSON.stringify(ok));
+    } finally { await t.stop(); }
+  });
+
+  /*
+   * Nothing that already worked may stop working.
+   *
+   * Two machines paired before any of this existed - a laptop and a desktop at
+   * home - must carry on exactly as they were. The announcement gained a field
+   * and the peer records gained a list; both are additions, and every path has
+   * to behave identically when neither is there.
+   */
+  await section('a pairing made by an older version still works untouched', async () => {
+    const t = await pair();
+    try {
+      // Pair the way the old code did: a peer object with one address and no
+      // list of alternatives, which is exactly what an older record hands over.
+      const showing = t.B.beginPairing();
+      const oldStylePeer = { deviceId: null, name: 'Home desktop',
+        address: '127.0.0.1', port: t.B.port };
+      const rec = await t.A.pairWith(oldStylePeer, showing.code);
+      check('pairing with a peer that has no address list still succeeds',
+        !!rec && !!rec.deviceId, rec && rec.name);
+
+      const asA = t.aStore.all()[0];
+      const sent = await t.A.send({ deviceId: asA.deviceId, name: asA.name,
+        address: '127.0.0.1', port: t.B.port }, { id: 'old', name: 'Board', objects: [] });
+      check('and sending to it needs no address list either',
+        !!sent && sent.accepted === true, JSON.stringify(sent));
+
+      // The stored record is the thing that survives a restart. It must look
+      // the same as it always did.
+      check('the pairing record still holds just the one address it was reached at',
+        asA.lastAddress === '127.0.0.1' && asA.lastPort === t.B.port,
+        `${asA.lastAddress}:${asA.lastPort}`);
+
+      // An announcement from a version that predates the new field.
+      t.A._notePeer({ t: 'gazboard', v: P.PROTOCOL, id: 'old-peer',
+        name: 'Older GazBoard', port: 53318 }, '192.168.0.44');
+      const seen = t.A._list().find((p) => p.deviceId === 'old-peer');
+      check('an older machine is listed at the address its packet came from, as before',
+        !!seen && seen.address === '192.168.0.44', seen && seen.address);
+
+      // ...and the new field is one an older machine simply does not read.
+      // Proving that here means proving the announcement is still ordinary
+      // JSON with the same keys in it that it always had.
+      const msg = JSON.parse(Buffer.from(JSON.stringify({
+        t: 'gazboard', v: P.PROTOCOL, id: 'x', name: 'y', port: 53318, a: ['10.0.0.1']
+      })).toString());
+      check('the announcement keeps every field an older version reads',
+        msg.t === 'gazboard' && msg.v === P.PROTOCOL && !!msg.id && !!msg.name && !!msg.port);
+    } finally { await t.stop(); }
+  });
+
+  /*
+   * The receiving end, reporting for itself.
+   *
+   * The sender has always had progress; the receiver had nothing, and a board
+   * with slides on it is a real wait on classroom wifi. This checks the node
+   * actually calls back as the bytes land, names the sender from its own
+   * pairing record, and does not put the board's title on the wire.
+   */
+  await section('a board arriving is reported as it arrives', async () => {
+    const seen = [];
+    const t = await pair({ onReceiving: (i) => seen.push(i) });
+    try {
+      const showing = t.B.beginPairing();
+      await t.A.pairWith(t.peerB, showing.code);
+      const asA = t.aStore.all()[0];
+
+      // Big enough that the body arrives in more than one chunk.
+      const objects = [];
+      for (let i = 0; i < 400; i++) {
+        objects.push({ id: 'o' + i, type: 'note', x: i, y: i, w: 200, h: 200,
+          text: 'x'.repeat(600), color: '#ffd94a' });
+      }
+      await t.A.send({ deviceId: asA.deviceId, name: asA.name,
+        address: '127.0.0.1', port: t.B.port }, { id: 'big', name: 'Week 6 - Sorting', objects });
+
+      const arrived = seen.filter((s) => s.state === 'arrived');
+      check('the receiving side is told a board is coming in', seen.length > 0,
+        seen.length + ' updates');
+      check('and it names the sender from its own records, not from the wire',
+        seen.every((s) => s.name && s.name !== 'Another computer'),
+        seen[0] && seen[0].name);
+      check('the board only names itself once it has arrived and opened',
+        arrived.length === 1 && arrived[0].board === 'Week 6 - Sorting'
+        && seen.filter((s) => s.board).length === 1,
+        arrived[0] && arrived[0].board);
+      check('every update belongs to the one transfer', new Set(seen.map((s) => s.id)).size === 1);
+    } finally { await t.stop(); }
+  });
+
+  /*
+   * Naming the sender when they are on an older build.
+   *
+   * The id that lets the badge say a name before the board has finished
+   * arriving rides in a header only this release sends. A colleague still on
+   * 2.6.3 sends nothing, and the badge said "Another computer" - which is
+   * barely better than no badge, because the point of it is knowing who is
+   * about to drop a board on you mid-lesson.
+   *
+   * Their machine is still named here: it was named when it paired, and the
+   * address it is calling from is on that record.
+   */
+  await section('a sender on an older build is still named', async () => {
+    const seen = [];
+    const t = await pair({ onReceiving: (i) => seen.push(i) });
+    try {
+      const showing = t.B.beginPairing();
+      await t.A.pairWith(t.peerB, showing.code);
+      const asA = t.aStore.all()[0];
+
+      // Strip the header the way an older version would: it simply never sets
+      // one. Everything else about the send is unchanged.
+      const http = require('node:http');
+      const realRequest = http.request;
+      http.request = function (opts, ...rest) {
+        if (opts && opts.headers) { delete opts.headers['x-gazboard-from']; }
+        return realRequest.call(this, opts, ...rest);
+      };
+      let sent;
+      try {
+        const objects = [];
+        for (let i = 0; i < 300; i++) {
+          objects.push({ id: 'o' + i, type: 'note', x: i, y: i, w: 200, h: 200,
+            text: 'y'.repeat(600), color: '#ffd94a' });
+        }
+        sent = await t.A.send({ deviceId: asA.deviceId, name: asA.name,
+          address: '127.0.0.1', port: t.B.port }, { id: 'old', name: 'Older Board', objects });
+      } finally { http.request = realRequest; }
+
+      check('the board still arrives from an older sender', !!sent && sent.accepted === true);
+      check('and it is named from the pairing record, not shrugged at',
+        seen.length > 0 && seen.every((s) => s.name !== 'Another computer'),
+        (seen[0] && seen[0].name) || '(nothing reported)');
+      const arrived = seen.filter((s) => s.state === 'arrived');
+      check('the name is certain once the envelope opens',
+        arrived.length === 1 && arrived[0].name === 'Desk PC',
+        arrived[0] && arrived[0].name);
+    } finally { await t.stop(); }
+  });
+
+  /*
+   * A computer that has been renamed since it paired.
+   *
+   * A pairing record keeps the name the other machine had ON THE DAY. Rename
+   * it later and every machine that knows it carries on using the old one -
+   * so the arrival badge said DESKTOP-27V8MQP while the device list beside it
+   * showed "Souharda's Desktop", because the list reads live announcements and
+   * the record does not.
+   *
+   * The name now travels inside the sealed envelope, where it is signed along
+   * with the board: change a byte of it and nothing opens at all.
+   */
+  await section('a computer renamed after pairing is called by its new name', async () => {
+    const seen = [];
+    const t = await pair({ onReceiving: (i) => seen.push(i) });
+    try {
+      const showing = t.B.beginPairing();
+      await t.A.pairWith(t.peerB, showing.code);
+
+      const before = t.bStore.all()[0];
+      check('B files A under the name it paired with', before.name === 'Desk PC', before.name);
+
+      // A is renamed. Nothing tells B - that is the whole problem.
+      const renamed = createSyncNode({
+        deviceId: before.deviceId, deviceName: "Souharda's Desktop", paired: t.aStore,
+        host: '127.0.0.1', broadcast: '127.0.0.1', discoveryPort: 0,
+        onBoard: async () => 'kept-both'
+      });
+      await renamed.start();
+      try {
+        const asA = t.aStore.all()[0];
+        await renamed.send({ deviceId: asA.deviceId, name: asA.name,
+          address: '127.0.0.1', port: t.B.port },
+        { id: 'r1', name: 'Renamed Board', objects: [] });
+      } finally { await renamed.stop(); }
+
+      const after = t.bStore.all()[0];
+      check('and calls it by the new one the moment it sends something',
+        after.name === "Souharda's Desktop", after.name);
+      const arrived = seen.filter((s) => s.state === 'arrived');
+      check('the badge says the new name too, not the one on the old record',
+        arrived.length === 1 && arrived[0].name === "Souharda's Desktop",
+        arrived[0] && arrived[0].name);
+      check('the device id is unchanged, so it is the same computer, not a second one',
+        after.deviceId === before.deviceId && t.bStore.all().length === 1,
+        t.bStore.all().length + ' record(s)');
+    } finally { await t.stop(); }
+  });
+
+  /*
+   * A device that was forgotten while it was switched off.
+   *
+   * Forgetting travels - but only to a machine that is listening. Forget a
+   * desktop while it is closed and it never hears; it opens the next day still
+   * showing a Send button, presses it, and only then finds out. That part is
+   * unavoidable: this machine deliberately refuses to tell an unauthenticated
+   * caller whether it is paired with them, because that is a question a
+   * stranger could ask about anybody.
+   *
+   * What IS required: the board must not arrive, it must be refused before it
+   * is read rather than after, and it must not put a ring and a chime on
+   * somebody's screen on the way.
+   */
+  await section('a device forgotten while it was away cannot send after all', async () => {
+    const seen = [];
+    const t = await pair({ onReceiving: (i) => seen.push(i) });
+    try {
+      const showing = t.B.beginPairing();
+      await t.A.pairWith(t.peerB, showing.code);
+      const asA = t.aStore.all()[0];
+      const asB = t.bStore.all()[0];
+
+      // B forgets A with A unreachable, so A never hears about it. Removing the
+      // record directly is exactly what B's own unpair() does first.
+      t.bStore.remove(asB.deviceId);
+
+      let refused = '';
+      try {
+        await t.A.send({ deviceId: asA.deviceId, name: asA.name,
+          address: '127.0.0.1', port: t.B.port },
+        { id: 'ghost', name: 'Should not arrive', objects: [{ id: 'x', type: 'note' }] });
+      } catch (e) { refused = e.message; }
+
+      check('the board is refused, not accepted', /forgotten this one/i.test(refused), refused);
+      check('and it never reached the other side', t.arrivals.every((m) => m.board.id !== 'ghost'),
+        t.arrivals.length + ' arrival(s)');
+      check('nothing rang or flashed on the receiving screen either',
+        seen.length === 0, seen.length + ' badge update(s)');
+      check('the sender takes the hint and forgets them back, rather than trying forever',
+        t.aStore.all().length === 0, t.aStore.all().length + ' record(s) left');
+    } finally { await t.stop(); }
+  });
+
+  /*
+   * ...and the same for somebody nobody has ever paired with.
+   */
+  await section('a stranger cannot ring the doorbell', async () => {
+    const seen = [];
+    const t = await pair({ onReceiving: (i) => seen.push(i) });
+    try {
+      const http = require('node:http');
+      const body = Buffer.from(JSON.stringify({ v: P.PROTOCOL, iv: 'x', tag: 'y',
+        aad: { from: 'nobody-has-met-this', kind: 'board', v: P.PROTOCOL }, body: 'z' }));
+      const status = await new Promise((resolve) => {
+        const req = http.request({ host: '127.0.0.1', port: t.B.port, path: '/send',
+          method: 'POST', timeout: 4000,
+          headers: { 'content-type': 'application/json', 'content-length': body.length,
+            'x-gazboard-from': 'nobody-has-met-this' } },
+        (res) => { res.resume(); resolve(res.statusCode); });
+        req.on('error', () => resolve(0));
+        req.on('timeout', () => { req.destroy(); resolve(0); });
+        req.end(body);
+      });
+      check('a sender nobody is paired with is turned away', status === 401, 'HTTP ' + status);
+      check('and does not get to put a ring on anybody\'s screen',
+        seen.length === 0, seen.length + ' badge update(s)');
+    } finally { await t.stop(); }
+  });
+
+  /*
+   * Finding out you were forgotten WITHOUT having to send a board first.
+   *
+   * Tested twice, in front of a class: forget a desktop while it is closed, it
+   * opens the next morning still offering to Send, and the only way it learns
+   * otherwise is to push a whole board and be refused.
+   */
+  await section('a machine can ask whether it is still paired', async () => {
+    const t = await pair();
+    try {
+      const showing = t.B.beginPairing();
+      await t.A.pairWith(t.peerB, showing.code);
+      const asA = t.aStore.all()[0];
+      const peer = { deviceId: asA.deviceId, name: asA.name, address: '127.0.0.1', port: t.B.port };
+
+      check('while both ends agree, the answer is yes', await t.A.stillPaired(peer) === true);
+
+      // B forgets A with A unreachable, so A is never told.
+      t.bStore.remove(t.bStore.all()[0].deviceId);
+      const answer = await t.A.stillPaired(peer);
+      check('once the other end has forgotten, the answer is no - before any board moves',
+        answer === false, String(answer));
+      check('and this end takes the hint rather than offering to send into a wall',
+        t.aStore.all().length === 0, t.aStore.all().length + ' record(s) left');
+    } finally { await t.stop(); }
+  });
+
+  await section('asking is not a way to probe strangers', async () => {
+    const t = await pair();
+    try {
+      const showing = t.B.beginPairing();
+      await t.A.pairWith(t.peerB, showing.code);
+      const realId = t.bStore.all()[0].deviceId;
+
+      // The right device id, but no key: exactly what an eavesdropper who has
+      // watched an announcement go past would have.
+      const http = require('node:http');
+      const ask = (aad) => new Promise((resolve) => {
+        const body = Buffer.from(JSON.stringify({ v: P.PROTOCOL, iv: 'AAAAAAAAAAAAAAAA',
+          tag: 'AAAAAAAAAAAAAAAAAAAAAA==', aad, body: '' }));
+        const req = http.request({ host: '127.0.0.1', port: t.B.port, path: '/paired',
+          method: 'POST', timeout: 4000,
+          headers: { 'content-type': 'application/json', 'content-length': body.length } },
+        (res) => {
+          const c = [];
+          res.on('data', (d) => c.push(d));
+          res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(c).toString())); }
+            catch { resolve(null); } });
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        req.end(body);
+      });
+
+      const known = await ask({ from: realId, kind: 'still-paired', v: P.PROTOCOL });
+      const unknown = await ask({ from: 'never-heard-of-this-one', kind: 'still-paired', v: P.PROTOCOL });
+      check('a device id without the key learns nothing', known && known.paired === false,
+        JSON.stringify(known));
+      check('and gets the same answer as an id nobody has ever paired with',
+        unknown && unknown.paired === false
+        && JSON.stringify(known) === JSON.stringify(unknown), JSON.stringify(unknown));
+    } finally { await t.stop(); }
+  });
+
+  /*
+   * The exact shape of it, reported from a real desk.
+   *
+   * A desktop still on an older build is forgotten while it is switched off.
+   * It never hears, so the next morning it offers to Send and does. It names
+   * nobody in its request - the header that carries a device id is newer than
+   * it is - so the receiver cannot place the caller until the envelope opens,
+   * and the envelope will never open because the record is gone.
+   *
+   * The board must be refused, and - this is the part that was wrong - the
+   * chime must not ring and the ring must not appear. Otherwise anything at
+   * all that can reach the port gets to interrupt a lesson.
+   */
+  await section('an older forgotten machine is refused in silence', async () => {
+    const seen = [];
+    const t = await pair({ onReceiving: (i) => seen.push(i) });
+    try {
+      const showing = t.B.beginPairing();
+      await t.A.pairWith(t.peerB, showing.code);
+      const asA = t.aStore.all()[0];
+
+      // B forgets A while A is unreachable. A is never told.
+      t.bStore.remove(t.bStore.all()[0].deviceId);
+
+      // A is an older build: no x-gazboard-from header on anything it sends.
+      const http = require('node:http');
+      const realRequest = http.request;
+      http.request = function (opts, ...rest) {
+        if (opts && opts.headers) delete opts.headers['x-gazboard-from'];
+        return realRequest.call(this, opts, ...rest);
+      };
+      let refused = '';
+      try {
+        const objects = [];
+        for (let i = 0; i < 200; i++) {
+          objects.push({ id: 'o' + i, type: 'note', x: i, y: i, w: 200, h: 200,
+            text: 'z'.repeat(600), color: '#ffd94a' });
+        }
+        await t.A.send({ deviceId: asA.deviceId, name: asA.name,
+          address: '127.0.0.1', port: t.B.port }, { id: 'ghost2', name: 'Nope', objects });
+      } catch (e) { refused = e.message; } finally { http.request = realRequest; }
+
+      check('the board is refused', /forgotten this one/i.test(refused), refused);
+      check('and nothing of it reached the board', t.arrivals.every((m) => m.board.id !== 'ghost2'),
+        t.arrivals.length + ' arrival(s)');
+      check('no chime, no ring - a refused sender does not get to interrupt anybody',
+        seen.length === 0, seen.length + ' badge update(s)');
+    } finally { await t.stop(); }
+  });
+
+  await section('a PowerShell error is turned into a sentence', async () => {
+    const { plainPowerShellError } = require('../sync/firewall.js');
+
+    const denied = '#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/'
+      + 'powershell/2004/04"><S S="Error">Get-NetFirewallRule : Access is denied. _x000D__x000A_</S>'
+      + '<S S="Error">At line:1 char:1_x000D__x000A_</S>'
+      + '<S S="Error">+ CategoryInfo          : PermissionDenied_x000D__x000A_</S></Objs>';
+    const outDenied = plainPowerShellError(denied);
+    check('the CLIXML wrapper never reaches the panel',
+      !/CLIXML|<Objs|<S S=|_x000D_/.test(outDenied), outDenied);
+    check('and "access is denied" is said as who this account is not',
+      /administrator/i.test(outDenied) && /not one/i.test(outDenied), outDenied);
+
+    const missing = '#< CLIXML\r\n<Objs><S S="Error">The term \'Get-NetFirewallRule\' is not '
+      + 'recognized as the name of a cmdlet._x000D__x000A_</S></Objs>';
+    check('an old Windows without the commands says that, not a stack trace',
+      /does not have the firewall commands/i.test(plainPowerShellError(missing)),
+      plainPowerShellError(missing));
+
+    const policy = '#< CLIXML\r\n<Objs><S S="Error">File cannot be loaded because running '
+      + 'scripts is disabled on this system._x000D__x000A_</S></Objs>';
+    check('a machine with PowerShell switched off by policy says so',
+      /policy/i.test(plainPowerShellError(policy)), plainPowerShellError(policy));
+
+    // Plain stderr, from a shell that was not PowerShell at all.
+    check('an ordinary error is passed through, tidied',
+      plainPowerShellError('Set-NetFirewallRule : something odd happened')
+        === 'something odd happened',
+      plainPowerShellError('Set-NetFirewallRule : something odd happened'));
+    check('and nothing at all stays nothing, rather than becoming a sentence',
+      plainPowerShellError('') === '' && plainPowerShellError(null) === '');
+  });
 
   await section('what the installer actually contains', async () => {
     const fs = require('node:fs');

@@ -8,6 +8,9 @@ const P = {
   pen: 'M4 20l1.2-4L16 5.2a2 2 0 0 1 2.8 0l.8.8a2 2 0 0 1 0 2.8L8.6 19.4 4 20zM14.5 6.7l3.3 3.3',
   highlighter: 'M6.5 19H4v-2.2l8.6-8.6 2.7 2.7L6.5 19zM13.6 6.9l2.2-2.2a1.7 1.7 0 0 1 2.4 0l1.6 1.6a1.7 1.7 0 0 1 0 2.4l-2.2 2.2M4 21.5h16',
   eraser: 'M8.6 20H20M4.7 16.3l6-6a2 2 0 0 1 2.9 0l4.5 4.5a2 2 0 0 1 0 2.9L15.6 20H9.3l-4.6-4.6a1 1 0 0 1 0-1.4zM9.5 11.5l5.6 5.6',
+  group: 'M4 4h7v7H4zM13 13h7v7h-7zM11 8h2M8 11v2',
+  ungroup: 'M3 3h6v6H3zM15 15h6v6h-6zM10.5 6.5l3-3M13.5 6.5l-3-3',
+  emoji: 'M12 3a9 9 0 100 18 9 9 0 000-18M9 10h.01M15 10h.01M8.4 14.2a4.6 4.6 0 007.2 0',
   note: 'M4.5 4.5h15v9.6L14.1 19.5H4.5zM19.5 14.1h-5.4v5.4M8 9h8M8 12h5.5',
   text: 'M5 6.5V5h14v1.5M12 5v14M9 19h6',
   shapes: 'M4 13h7v7H4zM15.5 4l5 8h-10z',
@@ -17,6 +20,9 @@ const P = {
   template: 'M4 5h16v5H4zM4 12h7v7H4zM13 12h7v7h-7z',
   ruler: 'M3.5 14.5l11-11 6 6-11 11zM7 11l1.8 1.8M9.8 8.2l1.8 1.8M12.6 5.4l1.8 1.8',
   more: 'M6 12h.01M12 12h.01M18 12h.01',
+  // Two machines with a line between them: this is about handing a board to
+  // the computer across the room, not about posting it anywhere.
+  share: 'M6.5 9.2a2.7 2.7 0 1 0 0 5.4 2.7 2.7 0 0 0 0-5.4zM17.5 3.6a2.7 2.7 0 1 0 0 5.4 2.7 2.7 0 0 0 0-5.4zM17.5 15a2.7 2.7 0 1 0 0 5.4 2.7 2.7 0 0 0 0-5.4zM8.9 10.6l6.2-3.1M8.9 13.4l6.2 3.1',
   settings: 'M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4zM19.4 13.5l1.7 1.1-1.9 3.3-2-.7a7.6 7.6 0 0 1-1.8 1l-.3 2.1h-3.8l-.3-2.1a7.6 7.6 0 0 1-1.8-1l-2 .7-1.9-3.3 1.7-1.1a7.7 7.7 0 0 1 0-2.1L4.6 10.4l1.9-3.3 2 .7a7.6 7.6 0 0 1 1.8-1l.3-2.1h3.8l.3 2.1c.6.3 1.2.6 1.8 1l2-.7 1.9 3.3-1.7 1.1c.1.7.1 1.4 0 2.1z',
   zoomIn: 'M11 4a7 7 0 1 1 0 14 7 7 0 0 1 0-14zM16 16l4.5 4.5M8 11h6M11 8v6',
   zoomOut: 'M11 4a7 7 0 1 1 0 14 7 7 0 0 1 0-14zM16 16l4.5 4.5M8 11h6',
@@ -24,6 +30,8 @@ const P = {
   close: 'M6 6l12 12M18 6L6 18',
   back: 'M15 5l-7 7 7 7',
   chevronDown: 'M6 9l6 6 6-6',
+  chevronUp: 'M6 15l6-6 6 6',
+  plus: 'M12 5v14M5 12h14',
   chevronRight: 'M9 6l6 6-6 6',
   trash: 'M4.5 7h15M9.5 7V5h5v2M6.5 7l1 13h9l1-13M10 10.5v6.5M14 10.5v6.5',
   copy: 'M8 8h11v11H8zM5 16V5h11',
@@ -45,7 +53,16 @@ const P = {
   rowAdd: 'M4 4h16v5H4zM4 9h16v5H4M12 17v5M9.5 19.5h5',
   rowDel: 'M4 4h16v5H4zM4 9h16v5H4M9.5 19.5h5',
   colAdd: 'M4 4h5v16H4zM9 4h5v16H9M19 9v6M16 12h6',
-  colDel: 'M4 4h5v16H4zM9 4h5v16H9M16 12h6'
+  colDel: 'M4 4h5v16H4zM9 4h5v16H9M16 12h6',
+  // a screen on a stand with a play mark: presenting
+  present: 'M3 4h18v12H3zM12 16v4M8 20h8M10.2 7.6v4.8l4-2.4z',
+  // a stopwatch: the class timer
+  timer: 'M12 21a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM12 9v4.2l2.6 1.6M10 2.5h4M12 2.5V5M18.6 6.4l1.2-1.2',
+  pause: 'M8.5 5.5v13M15.5 5.5v13',
+  play: 'M7.5 5.2l11 6.8-11 6.8z',
+  eye: 'M2.5 12C3.8 10 7.3 6 12 6s8.2 4 9.5 6c-1.3 2-4.8 6-9.5 6s-8.2-4-9.5-6zM12 9.2a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6z',
+  // a card lying over some lines: an answer cover
+  curtain: 'M4 4h16v6H4zM4 14h16M4 18h10M7 7h10'
 };
 
 export function icon(name, size = 20, stroke = 1.6) {

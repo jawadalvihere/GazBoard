@@ -13,7 +13,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { createSyncNode, TRANSFER_PORT, DISCOVERY_PORT } = require('./node.js');
+const { createSyncNode, localAddresses, TRANSFER_PORT, DISCOVERY_PORT } = require('./node.js');
 const P = require('./protocol.js');
 
 /**
@@ -75,7 +75,7 @@ function createIdentity(userDataDir) {
  *        which is the renderer showing someone the arriving board and waiting.
  * @param {Function} opts.onPeers        called when the visible device list changes
  */
-function createSyncService({ userDataDir, askAboutBoard, onPeers = () => {} }) {
+function createSyncService({ userDataDir, askAboutBoard, onPeers = () => {}, onReceiving = () => {} }) {
   const id = createIdentity(userDataDir);
   let node = null;
   let lastError = null;
@@ -94,10 +94,15 @@ function createSyncService({ userDataDir, askAboutBoard, onPeers = () => {} }) {
       // - that is TCP - but nobody appears in anybody's list by themselves.
       discovery: !!node && node.discovery,
       discoveryPort: DISCOVERY_PORT,
+      // What to type on the other computer when this one does not turn up in
+      // its list. Asked for fresh every time, because a laptop that moves from
+      // wifi to a cable gets a different one without the app being told.
+      addresses: localAddresses(),
       error: lastError,
       peers: node ? node.peers() : [],
       paired: node ? node.pairedDevices() : id.paired.all().map((r) => ({
-        deviceId: r.deviceId, name: r.name, remember: !!r.remember, pairedAt: r.pairedAt
+        deviceId: r.deviceId, name: r.name, remember: !!r.remember, pairedAt: r.pairedAt,
+        lastAddress: r.lastAddress || null, lastPort: r.lastPort || null
       }))
     };
   }
@@ -110,6 +115,7 @@ function createSyncService({ userDataDir, askAboutBoard, onPeers = () => {} }) {
       deviceName: id.deviceName,
       paired: id.paired,
       onPeers,
+      onReceiving,
       onBoard: askAboutBoard
     });
     try {
@@ -143,6 +149,9 @@ function createSyncService({ userDataDir, askAboutBoard, onPeers = () => {} }) {
       if (!node) throw new Error('sync is switched off');
       return node.addByAddress(address);
     },
+    // null means "could not ask", which is not the same as "no" - see the note
+    // on stillPaired() in node.js.
+    stillPaired: (peer) => (node ? node.stillPaired(peer) : null),
     // Awaited, so the caller knows when the other machine has been told and can
     // redraw a list that is now right on both computers.
     unpair: async (deviceId) => {

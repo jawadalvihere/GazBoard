@@ -1,16 +1,52 @@
 // Pointer interaction: one small state machine covering every tool.
 
 import { uid, bboxOfPoints, clamp, dist, simplify, unionBox } from './util.js';
-import { boundsOf, worldBounds, withAttached } from './store.js';
-import { pick, inBox, inLasso, strokesAlong, normalizeBox } from './hit.js';
-import { handlePositions, HANDLE, HANDLES, drawShape } from './render.js';
+import { boundsOf, worldBounds, withAttached, withGroups} from './store.js';
+import { pick, inBox, inLasso, strokesAlong, normalizeBox, curtainAt, toLocal } from './hit.js';
+import { handlePositions, HANDLE, HANDLES, drawShape, inkPaint } from './render.js';
 import { translateObject, scaleObject, rotateObjectAround, normalizeRect, anchorFor, CURSORS } from './transform.js';
 import { recognize, fitError, MAX_FIT_ERROR } from './recognize.js';
 import { splitStroke } from './erase.js';
 import { inkCursor, inkGlyphUrl, inkGlyphHotspot } from './cursors.js';
 import { pageRects, pageIndexAt, pageIndexForBox, nearestPageIndex, offsetIntoRect, inRect } from './pages.js';
+import { Surface } from './surface.js';
+import { t, currentLanguage } from '../i18n.js';
+import { SHAPE_LABELS } from '../ui/palettes.js';
 
 const TAP_SLOP = 4;
+/*
+ * How close to the nib's last position a mouse report has to land before it is
+ * taken for Windows re-asserting the pointer rather than a person moving a
+ * mouse. Small on purpose: a mouse anybody has actually touched travels
+ * further than this between two reports.
+ */
+const GHOST_SLOP = 4;
+/*
+ * Press and hold to pick something up.
+ *
+ * A finger drag has to keep drawing - writing on an imported slide with a
+ * fingertip is most of what a tablet is for, and those slides are objects like
+ * any other, so "drag moves things" would drag the lesson around instead of
+ * annotating it. Holding still for a moment is the one gesture that cannot be
+ * confused with either drawing or panning, which is why every touch platform
+ * uses it for exactly this.
+ *
+ * The slop is wider than a tap's: a finger resting on glass wanders further
+ * than a pen tip does, and punishing that would make the gesture feel broken.
+ */
+const HOLD_MS = 450;
+/*
+ * A stylus waits longer than a finger.
+ *
+ * Holding an object to pick it up is the gesture everybody already knows, and
+ * a pen should get it too. But a pen is also the thing you write with, and a
+ * nib resting on the board for a moment while you think about the next letter
+ * is not a request to move anything. A finger has no such second job, so it
+ * keeps the short press; the pen gets one long enough that a thinking pause
+ * passes underneath it and a deliberate press still feels immediate.
+ */
+const PEN_HOLD_MS = 700;
+const HOLD_SLOP = 11;
 const HANDLE_GRAB = 12;   // forgiving grab radius around a handle's 9px dot
 
 /** Gestures that should keep going while the canvas scrolls beneath them. */
@@ -39,6 +75,7 @@ export class Interaction {
     this._wheelFrom = null;     // 'mouse' or 'trackpad', for the stream in flight
     this._wheelAt = 0;
     this._penSp = null;         // and where it was, in screen coordinates
+    this._mouseSp = null;       // the last mouse report, for telling one from a stream
     this._edgeRaf = null;
     this.rightPan = null;       // an in-flight right-button drag
     this._eatNextMenu = false;  // a right-drag must not end in a context menu
@@ -61,6 +98,33 @@ export class Interaction {
     c.addEventListener('dblclick', (e) => this.onDoubleClick(e));
     c.addEventListener('contextmenu', (e) => {
       e.preventDefault();
+      // Android opens expanded actions from the selection bar's More button.
+      // Its native long-press event can arrive even after the pointer lifts.
+      if (document.documentElement?.dataset.platform === 'android') return;
+      /*
+       * A right-click idea, on a device with no right button.
+       *
+       * Android raises contextmenu after about half a second of holding - the
+       * same half second that now means "pick this up". Both fired, so every
+       * attempt to move a note ended with the menu covering the note. Two
+       * gestures, one press, and the wrong one won.
+       *
+       * A finger gets the pick-up; a mouse or a pen keeps the menu. Nothing is
+       * out of reach either way: the bar that floats above a selection has the
+       * same actions, and on a touch device it carries a "..." for the rest.
+       */
+      /*
+       * One press, one menu.
+       *
+       * Windows raises its own contextmenu when a pen is held against the
+       * glass, which now collides with the board's own press-and-hold: two
+       * menus, or one arriving early. Whichever gets there first wins and the
+       * other is dropped - the pending hold is abandoned here, and a native
+       * menu that turns up just after ours is ignored.
+       */
+      this.cancelHold();
+      if (Date.now() - (this._boardMenuAt || 0) < 1200) return;
+      if (this._lastDownType === 'touch' || this.action?.holdMenu) return;
       // A right-DRAG panned the canvas, so it is not a right-CLICK: swallow the
       // menu this once. A plain right-click never sets this and is unaffected.
       if (this._eatNextMenu) { this._eatNextMenu = false; return; }
@@ -82,12 +146,43 @@ export class Interaction {
   effectiveTool(e) {
     if (this.spaceDown || e.button === 1) return 'pan';
     if (e.pointerType === 'pen' && (e.buttons & 32 || e.button === 5)) return 'eraser';  // pen tail
+    /*
+     * The side button on a stylus, held while the tip is writing.
+     *
+     * The line above only knows about a pen's TAIL - flip a Wacom over and the
+     * blunt end reports itself as an eraser. An S Pen has no tail. It has a
+     * button on its side, and on Samsung's own apps holding that button while
+     * you draw is how you rub something out. Somebody tried it in GazBoard,
+     * found annotating worked and erasing did not, and reasonably assumed the
+     * feature was missing.
+     *
+     * A browser calls that the barrel button, and it is bit 2 of `buttons`.
+     * The tip being down at the same time is what makes this unambiguous: the
+     * whole value is 3, primary AND secondary. A barrel press with the tip in
+     * the air never reaches here - onDown() returns early for that, which is
+     * what keeps right-drag panning and the context menu working exactly as
+     * they did on a Wacom whose owner has mapped the button to right-click.
+     */
+    if (e.pointerType === 'pen' && this.app.settings.penButtonErases !== false
+        && (e.buttons & 2)) return 'eraser';
     if (e.button === 2) return 'select';
     // Whiteboard's rule: once a stylus is in play the mouse stops being a pen
     // and becomes a POINTER - it selects and drags objects, and pans the empty
     // canvas. It is not a plain pan tool: dragging a picture has to move the
     // picture, not the whole board.
     if (e.pointerType === 'mouse' && !this.app.mouseInks && (this.tool === 'pen' || this.tool === 'highlighter'))
+      return 'mousePointer';
+    /*
+     * And the same rule for a finger, which is how one-finger panning works.
+     *
+     * It routes to the SAME pointer behaviour as the mouse: on an object the
+     * finger drags that object, on bare board it moves the board. Not a plain
+     * pan tool - dragging a picture has to move the picture. The eraser is
+     * deliberately not in this list: a finger reaching for the eraser means to
+     * erase, and there is no ambiguity to resolve.
+     */
+    if (e.pointerType === 'touch' && !this.app.fingerInks
+        && (this.tool === 'pen' || this.tool === 'highlighter'))
       return 'mousePointer';
     return this.tool;
   }
@@ -120,8 +215,25 @@ export class Interaction {
       return;
     }
     try { this.canvas.setPointerCapture?.(e.pointerId); } catch { /* synthetic or already-released pointer */ }
+    this._lastDownType = e.pointerType;
     if (e.pointerType === 'pen') this._penAt = performance.now();
-    this.app.hideMenus();
+    // A button went down under a mouse, so the mouse is unambiguously in
+    // somebody's hand. Stop watching for a ghost that cannot now arrive.
+    else if (e.pointerType === 'mouse') { this._penSp = null; this._mouseSp = null; }
+    /*
+     * The press that shuts a menu only shuts the menu.
+     *
+     * Choosing a shape, a colour and a fill leaves the menu open, and the tap
+     * that puts it away used to land on the board as well: a stray default-
+     * sized square, dropped where you were only trying to dismiss something.
+     * Ink has had this guard for a long time - a tap that clears a selection is
+     * swallowed rather than left as a dot - and the tools that make an object
+     * out of a single tap need it just as much.
+     *
+     * Only a TAP is swallowed. Press and drag and you get your shape on the
+     * first go, because a drag was never ambiguous.
+     */
+    const dismissedMenu = this.app.hideMenus();
     // A pointerup that never arrives - a pen lifted as the window loses focus,
     // a cancel routed elsewhere - used to leave its id in the map for good.
     // The next pen down then looked like a second finger and was treated as a
@@ -129,10 +241,26 @@ export class Interaction {
     // With no gesture in flight nothing can be relying on these entries, so
     // they are stale by definition and safe to forget.
     if (this.pointers.size && !this.action && !this.pinch && !this.secondaryPan) this.pointers.clear();
+    /*
+     * The same rule for the gesture itself. If the finger that owns whatever is
+     * in flight is no longer on the glass, that gesture ended - whether or not
+     * its pointerup ever reached us. Leaving it set used to jam every later
+     * press, and the only way back was to draw something. Nothing can depend on
+     * it once its owner is gone, so it is safe to let go of here.
+     */
+    if (this.action && this.actionId != null && !this.pointers.has(this.actionId)) {
+      this.surface.wet = null;
+      this.surface.wetPieces = null;
+      this.action = null;
+      this.actionId = null;
+    }
     const sp = this.surface.screenPoint(e);
     const wp = this.surface.cam.toWorld(sp.x, sp.y);
     if (e.pointerType === 'pen') this.app.notePenSeen();
     this.pointers.set(e.pointerId, { sp, wp, type: e.pointerType });
+    // Where the board was last touched, for anything later that needs a place
+    // and was not given one - Ctrl+V, most of all.
+    this.app.boardPoint = { x: wp.x, y: wp.y, at: performance.now() };
 
     if (this.pointers.size === 2) {
       // Two fingers pinch. A mouse (or a second pen) arriving while a stroke
@@ -169,24 +297,76 @@ export class Interaction {
       return;
     }
 
+    // Remember what this press could dismiss. Finishing a text edit clears
+    // its selection, before pointerup gets a chance to recognise the tap.
+    const selectionAtDown = this.surface.selection.size ? new Set(this.surface.selection) : null;
+    const handleSelection = !this.spaceDown && e.button !== 1 && this.handleAt(sp) ? selectionAtDown : null;
     // commit first: committing hands the board back to the pen, and the tool
     // must be resolved after that or the first stylus touch after typing runs
     // the old tool
     this.app.commitTextEdit();
+
+    /*
+     * Ctrl (or Cmd) and click means "gather this up", whatever tool is chosen.
+     *
+     * It has to sit ABOVE the tool switch, because which tool is active decides
+     * which of several paths a press takes, and only two of them ever looked at
+     * the modifier. Hold Ctrl with the pen tool chosen and the press went off
+     * to start a stroke; do it with a stylus and it drew a dot; do it while a
+     * Wacom was connected and the mouse pointer path moved the object instead.
+     * Three different wrong answers to the same gesture, which is why picking
+     * several things out felt like it skipped some of them.
+     *
+     * Ctrl on its own means nothing to any drawing tool here, so claiming it
+     * takes nothing away. Shift is deliberately NOT claimed: it constrains a
+     * shape to square and a line to an angle, and those are worth keeping.
+     * Shift still extends a selection wherever it already did.
+     */
+    if ((e.ctrlKey || e.metaKey) && !this.spaceDown && e.button === 0 && !handleSelection) {
+      const target = pick(this.store, wp, 8 / this.surface.cam.z);
+      if (target) {
+        this.app.chooseObject(target.id, true);
+        this.action = null;
+        this.actionId = null;
+        this.cancelHold();
+        this.surface.invalidate();
+        return;
+      }
+    }
     const tool = this.effectiveTool(e);
 
     // ruler interaction takes priority when it is showing
     if (this.ruler.visible) {
       const zone = this.rulerZone(sp);
-      if (zone === 'rotate') { this.action = { type: 'rulerRotate', start: wp, a0: this.ruler.angle }; return; }
-      if (zone === 'body' && (tool === 'select' || tool === 'pan')) {
+      // Whichever pointer grabbed the ruler owns it until it lifts, exactly as
+      // for every other gesture. Without that, a palm settling on the glass
+      // dragged the ruler, and a palm lifting ended the drag.
+      if (zone === 'rotate') {
+        const d = Math.atan2(wp.y - this.ruler.y, wp.x - this.ruler.x) - this.ruler.angle;
+        const flip = Math.abs(Math.atan2(Math.sin(d), Math.cos(d))) > Math.PI / 2;
+        this.action = { type: 'rulerRotate', start: wp, a0: this.ruler.angle, flip };
+        this.actionId = e.pointerId;
+        this.surface.invalidate();
+        return;
+      }
+      // The grip moves it whatever is in your hand. A finger does too, because
+      // that is the hand a real ruler is held with and it can never be meant
+      // as ink. The whole body still drags under Select or Pan, as it did.
+      if (zone === 'move' || (zone === 'body'
+          && (e.pointerType === 'touch' || tool === 'select' || tool === 'pan'))) {
         this.action = { type: 'rulerMove', start: wp, x0: this.ruler.x, y0: this.ruler.y };
+        this.actionId = e.pointerId;
+        this.surface.invalidate();
         return;
       }
     }
 
+    // Committing text can restore the pen and clear its selection. A handle
+    // pressed before that commit still belongs to the object being edited.
+    if (handleSelection) this.app.setSelection([...handleSelection]);
     // a visible handle is always draggable, whatever tool is active
     if (!this.spaceDown && e.button !== 1 && tool !== 'select' && this.startHandleGesture(sp, wp)) {
+      this.actionId = e.pointerId;
       this.surface.invalidate();
       return;
     }
@@ -205,18 +385,56 @@ export class Interaction {
         // Say so, once. Someone with no stylus who picks the pen and drags the
         // mouse gets a moving canvas and no ink, and there is nothing on screen
         // to explain why. A silent no-op is the whole bug this rule replaced.
-        this.app.showHint('mouse-pans',
-          'The <b>pen</b> draws and the <b>mouse</b> moves the canvas — both at once. '
-          + 'Drawing with a mouse instead? Settings › <b>Draw with the mouse › Always</b>.');
+        // The same behaviour reaches here from a mouse and from a finger, and
+        // they need different words: telling a phone user about their mouse
+        // explains nothing.
+        if (e.pointerType === 'touch') {
+          this.app.showHint('finger-pans',
+            t('The <b>pen</b> draws and your <b>finger</b> moves the board — both at once. Want to draw with a finger? Tap the hand on the toolbar, or Settings › <b>Draw with a finger</b>.'));
+        } else {
+          this.app.showHint('mouse-pans',
+            t('The <b>pen</b> draws and the <b>mouse</b> moves the canvas — both at once. Drawing with a mouse instead? Settings › <b>Draw with the mouse › Always</b>.'));
+        }
         const hit = pick(this.store, wp, 8 / this.surface.cam.z);
+        /*
+         * Holding Ctrl, Cmd or Shift means "gather these up", whatever tool
+         * happens to be chosen.
+         *
+         * This branch is where a mouse click lands once a stylus has been seen
+         * - the pen draws, the mouse points - and it used to ignore modifiers
+         * entirely. Ctrl-clicking a second object therefore behaved like a
+         * plain click and simply moved the selection to it, which is not what
+         * Ctrl means anywhere else and made picking several things out look
+         * broken. Selecting is a pointer's job, so it belongs here too.
+         */
+        const gathering = e.shiftKey || e.ctrlKey || e.metaKey || this.app.multiSelect;
+        if (hit && gathering) {
+          this.app.chooseObject(hit.id, true);
+          break;
+        }
         if (hit && !hit.locked) {
-          const objs = withAttached(this.store, [hit.id])
+          /*
+           * Everything this object is tied to comes along: notes stuck to a
+           * locked page, AND the rest of its group.
+           *
+           * This path is a drag that never touched the selection - the mouse
+           * acting as a pointer while the pen draws - so it gathers its own
+           * objects, and it only knew about attachment. A grouped house
+           * therefore held together while it was being selected and came apart
+           * the moment it was dragged, which reads as grouping being broken
+           * rather than as one path having been missed.
+           */
+          const objs = withAttached(this.store, withGroups(this.store, [hit.id], this.app.openGroup))
             .map((id) => this.store.get(id)).filter(Boolean).filter((o) => !o.locked);
           this.action = {
             type: 'move', start: wp, objs, transient: true,
             snap: this.store.snapshot(objs.map((o) => o.id)),
             origin: new Map(objs.map((o) => [o.id, { ...boundsOf(o) }]))
           };
+        } else if (gathering) {
+          // A modifier held over bare board is the start of a box selection
+          // that adds to what is already chosen, not an order to drop it.
+          this.action = { type: 'marquee', start: wp, cur: wp, additive: true };
         } else {
           // empty canvas: let go of whatever was selected, then pan
           if (this.surface.selection.size) this.app.setSelection([]);
@@ -228,14 +446,31 @@ export class Interaction {
         this.surface.laser = [{ x: wp.x, y: wp.y, t: performance.now() }];
         this.action = { type: 'laser' };
         break;
-      case 'pen': case 'highlighter': this.startStroke(e, wp, tool); break;
+      case 'pen': case 'highlighter':
+        this.startStroke(e, wp, tool);
+        if (this.action) this.action.selectionAtDown = selectionAtDown;
+        break;
       case 'eraser': this.startErase(wp); break;
       case 'lasso':
         // after a lasso select, dragging inside the selection moves it
         if (this.startMoveOnSelection(wp)) break;
         this.action = { type: 'lasso', pts: [wp] };
         break;
-      case 'shape': this.action = { type: 'shapeDraw', start: wp, cur: wp, shift: e.shiftKey }; break;
+      case 'shape': this.action = { type: 'shapeDraw', start: wp, cur: wp, shift: e.shiftKey, dismissedMenu }; break;
+      case 'emoji': {
+        // Landing on something that is already there should pick it up rather
+        // than stamp on top of it - the same courtesy notes and text extend.
+        const hit = pick(this.store, wp, 8 / this.surface.cam.z);
+        if (hit) {
+          this.app.setSelection([hit.id]);
+          if (hit.locked) { this.app.hintLocked(); break; }
+          this.app.setTool('select');
+          this.startSelect(e, sp, wp);
+          break;
+        }
+        if (!dismissedMenu) this.app.addEmojiAt(wp);
+        break;
+      }
       case 'text': case 'note': {
         // clicking something that is already there should get hold of it,
         // not drop a new note or text box on top of it
@@ -253,14 +488,25 @@ export class Interaction {
           }
           break;
         }
-        if (tool === 'note') this.dropNote(wp);
-        else this.action = { type: 'textDraw', start: wp, cur: wp };
+        if (tool === 'note') { if (!dismissedMenu) this.dropNote(wp); }
+        else this.action = { type: 'textDraw', start: wp, cur: wp, dismissedMenu };
         break;
       }
       case 'select': default: this.startSelect(e, sp, wp); break;
     }
+    /*
+     * The laser, and a mouse or finger that is moving the board while a pen
+     * does the writing, have no way to leave a mark - so a tap from them on an
+     * answer cover can only mean "show me". Remember what they landed on;
+     * onUp decides whether it was a tap.
+     */
+    if (this.action && (tool === 'laser' || tool === 'mousePointer') && !this.spaceDown && e.button === 0) {
+      this.action.cover = curtainAt(this.store, wp, 8 / this.surface.cam.z);
+      this.action.downSp = sp;
+    }
     // Whichever pointer began the gesture owns it until it lifts.
     this.actionId = this.action ? e.pointerId : null;
+    this.armHoldToMove(e, sp, wp);
     this.surface.invalidate();
   }
 
@@ -288,9 +534,10 @@ export class Interaction {
     if (this.moveRightPan(e)) return;
     if (e.pointerType === 'pen' && e.buttons) this.app.notePenSeen();
     const sp = this.surface.screenPoint(e);
-    if (e.pointerType === 'pen') { this._penAt = performance.now(); this._penSp = sp; }
+    if (e.pointerType === 'pen') { this._penAt = performance.now(); this._penSp = sp; this._mouseSp = null; }
     const wp = this.surface.cam.toWorld(sp.x, sp.y);
     if (this.pointers.has(e.pointerId)) this.pointers.set(e.pointerId, { sp, wp, type: e.pointerType });
+    this.app.boardPoint = { x: wp.x, y: wp.y, at: performance.now() };
 
     if (this.pinch && this.pointers.size >= 2) { this.updatePinch(); return; }
     if (this.pageSwipe && this.pointers.size >= 2) { this.updatePageSwipe(); return; }
@@ -305,14 +552,38 @@ export class Interaction {
        * mouse. Answering it repainted the cursor, so every full stop and every
        * lifted stroke ended in a hand flashing where the nib had been.
        *
-       * The ghost is recognisable by WHERE it lands: on the nib's own last
-       * position, moments after it. A mouse someone has actually picked up is
-       * somewhere else, and keeps sending moves besides - so a hand is still
-       * shown the instant the mouse is really used.
+       * This used to be recognised by WHERE it landed AND WHEN: within four
+       * pixels of the nib's last position, and within 800 milliseconds of it.
+       * The clock was the mistake. It measured how quickly the message reached
+       * us, which is not a property of the message at all - it is a property of
+       * how busy the machine happens to be. Put a screen recorder on the same
+       * laptop and the queue lengthens; the ghost turns up a second and a half
+       * late, sails past the deadline, and is believed. A hand then blinks
+       * where the pen was, between every two words, in front of a class.
+       *
+       * What settles it, whatever the machine is doing, is that the ghost is
+       * ONE report and a hand on a mouse is a stream of them. Windows sends a
+       * single "the mouse is here" as the pen leaves and then nothing more,
+       * because nothing is moving. A person who picks up a mouse produces
+       * report after report, each somewhere new.
+       *
+       * So the first mouse report after the pen is never believed, wherever it
+       * lands - that alone is what makes this independent of both the clock and
+       * of exactly where Windows decides to put the pointer. The second one, if
+       * it has moved, is a hand: take it, and stop watching, because from then
+       * on the mouse is genuinely in use. The cost is one report of delay
+       * before the cursor turns into a hand, which at pointer rates is a few
+       * thousandths of a second and cannot be seen.
        */
-      if (e.pointerType === 'mouse' && !e.buttons && this._penSp
-          && performance.now() - this._penAt < 800
-          && Math.hypot(sp.x - this._penSp.x, sp.y - this._penSp.y) < 4) return;
+      if (e.pointerType === 'mouse' && !e.buttons && this._penSp) {
+        const prev = this._mouseSp;
+        this._mouseSp = sp;
+        // No previous report to compare with: this is the single one Windows
+        // sends by itself. Still sitting in the same place: also not a hand.
+        if (!prev || Math.hypot(sp.x - prev.x, sp.y - prev.y) < GHOST_SLOP) return;
+        this._penSp = null;
+        this._mouseSp = null;
+      }
       this.updateHover(sp, wp, e.pointerType);
       return;
     }
@@ -322,6 +593,12 @@ export class Interaction {
     // the palm - the ink jumped, or looked like it had simply gone missing.
     if (this.actionId != null && e.pointerId !== this.actionId) return;
 
+    // Travelled too far to still be a press-and-hold: this is a stroke.
+    if (this._hold && e.pointerId === this._holdId && this._holdFrom
+        && Math.hypot(sp.x - this._holdFrom.x, sp.y - this._holdFrom.y) > HOLD_SLOP) {
+      this.cancelHold();
+    }
+
     // The drawn nib has to keep up with an ink stroke in flight. This is the
     // case the CSS cursor could never cover: Windows hides the system pointer
     // for exactly as long as the pen is down.
@@ -330,7 +607,15 @@ export class Interaction {
     this.lastMotion = { sp, mods: { shift: e.shiftKey, alt: e.altKey }, pressure: this.pressure(e) };
     this.applyMotion(sp, this.lastMotion.mods, e);
     this.updateEdgePan();
-    this.surface.invalidate();
+    /*
+     * Every other gesture asks for the whole board here, as it always has.
+     *
+     * An erase does not, because eraseSweep() has just asked for the exact
+     * band it touched - and a plain invalidate() on top of that would throw
+     * that away and repaint everything, which is precisely the thing being
+     * avoided. Nothing else about the frame differs.
+     */
+    if (this.action.type !== 'erase') this.surface.invalidate();
   }
 
   /**
@@ -356,7 +641,6 @@ export class Interaction {
         // land off the sheet are simply not picked up, and drawing resumes if
         // it comes back on, exactly as ink behaves at the edge of a page.
         const keep = (q) => !a.sheet || inRect(a.sheet, q.x, q.y);
-        const pt = this.snapToRuler({ ...wp, p: pressure }, a);
         let added = false;
 
         /*
@@ -372,10 +656,30 @@ export class Interaction {
          * events, and it was discarded with them: the peak of the letter
          * simply never arrived.
          */
-        const offer = (cand) => {
+        const offer = (raw) => {
+          /*
+           * The plastic is in the way.
+           *
+           * A stroke that runs ACROSS the ruler is not held to an edge - it is
+           * let go on the far side, which is right. But it was joining up
+           * through the middle, so a line dragged over the ruler came out
+           * drawn straight through the body of it. No ruler has ever let that
+           * happen. Points under the plastic are not taken at all, and when
+           * the pen comes out the other side the stroke starts again there
+           * rather than reaching back across the gap.
+           *
+           * Judged on where the pen actually IS, before the edge deflection
+           * below moves it - after that every point under the body has already
+           * been pushed onto one edge or the other and none of them looks like
+           * it was ever underneath. A ruled stroke is exempt: it lives on an
+           * edge by definition.
+           */
+          if (!a.ruled && this.underThePlastic(raw)) { a.blocked = true; return; }
+          const cand = this.snapToRuler(raw, a);
           const prev = a.obj.points[a.obj.points.length - 1];
           if (prev && dist(prev, cand) * this.surface.cam.z <= 1.2) return;
           if (!keep(cand)) return;
+          if (a.blocked) { this.breakStroke(a); a.blocked = false; }
           a.obj.points.push(cand);
           added = true;
         };
@@ -386,9 +690,9 @@ export class Interaction {
           for (const ce of evs) {
             const csp = this.surface.screenPoint(ce);
             const cwp = this.surface.cam.toWorld(csp.x, csp.y);
-            offer(this.snapToRuler({ ...cwp, p: this.pressure(ce) }, a));
+            offer({ ...cwp, p: this.pressure(ce) });
           }
-        } else offer(pt);
+        } else offer({ ...wp, p: pressure });
 
         if (added) a.obj.bbox = bboxOfPoints(a.obj.points);
         break;
@@ -405,18 +709,53 @@ export class Interaction {
         // the pointer actually went between frames, same as ink does.
         const trail = this.surface.laser;
         const now = performance.now();
-        const push = (q) => {
-          const last = trail[trail.length - 1];
-          if (last && dist(last, q) * this.surface.cam.z <= 1.5) return;
-          trail.push({ x: q.x, y: q.y, t: now });
-        };
         const evs = e && e.getCoalescedEvents ? e.getCoalescedEvents() : null;
+
+        /*
+         * A browser hands over several high-rate pen samples in one
+         * pointermove. Stamping the whole packet with the time it was
+         * delivered made the tail lose all of them on the same frame, which
+         * looked like square chunks vanishing off the end rather than a trail
+         * fading. Each sample needs a time of its own.
+         *
+         * Every coalesced sample already carries the moment it was actually
+         * taken, on the same clock the fade is measured against, so that is
+         * what is kept. Sharing the gap since the previous point out evenly
+         * would also stagger them, but it is only right while the pointer is
+         * moving: after a pause, four samples taken within a frame of each
+         * other would be dated across the whole pause, and a flick would be
+         * born half faded and die almost at once. Real times cannot do that.
+         */
+        const samples = [];
         if (evs && evs.length) {
           for (const ce of evs) {
             const csp = this.surface.screenPoint(ce);
-            push(this.surface.cam.toWorld(csp.x, csp.y));
+            const cwp = this.surface.cam.toWorld(csp.x, csp.y);
+            samples.push({ x: cwp.x, y: cwp.y, t: ce.timeStamp });
           }
-        } else push(wp);
+        }
+        // Some engines leave the pointermove itself out of the packet. Offering
+        // the current position last means a quick curve reaches the nib instead
+        // of visibly cutting the corner.
+        samples.push({ x: wp.x, y: wp.y, t: now });
+
+        /*
+         * A time is used only if it is on this clock and in the recent past. A
+         * synthetic event, or an engine that reports zero, falls back to now
+         * rather than laying down a point that is already dead. Each point is
+         * also held to the one before it: pruning walks the trail from the
+         * front and stops at the first point still alive, so a time that went
+         * backwards would strand everything behind it.
+         */
+        let floor = trail.length ? trail[trail.length - 1].t : now - Surface.LASER_LIFE;
+        for (const q of samples) {
+          const last = trail[trail.length - 1];
+          if (last && dist(last, q) * this.surface.cam.z <= 0.75) continue;
+          const fresh = typeof q.t === 'number' && q.t <= now && now - q.t < Surface.LASER_LIFE;
+          const t = Math.max(floor, fresh ? q.t : now);
+          trail.push({ x: q.x, y: q.y, t });
+          floor = t;
+        }
         break;
       }
       case 'marquee': a.cur = wp; break;
@@ -427,6 +766,10 @@ export class Interaction {
       }
       case 'move': {
         let dx = wp.x - a.start.x, dy = wp.y - a.start.y;
+        if (a.holdMenu && Math.hypot(dx, dy) * this.surface.cam.z > TAP_SLOP) {
+          this.app.hideMenus();
+          a.holdMenu = false;
+        }
         if (mods.shift) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
         for (const o of a.objs) {
           const b = a.origin.get(o.id);
@@ -478,7 +821,8 @@ export class Interaction {
         break;
       }
       case 'rulerRotate': {
-        const ang = Math.atan2(wp.y - this.ruler.y, wp.x - this.ruler.x);
+        // Grabbing the far end turns it the same way round, not upside down.
+        const ang = Math.atan2(wp.y - this.ruler.y, wp.x - this.ruler.x) + (a.flip ? Math.PI : 0);
         this.ruler.angle = mods.shift ? Math.round(ang / (Math.PI / 36)) * (Math.PI / 36) : ang;
         break;
       }
@@ -486,7 +830,7 @@ export class Interaction {
   }
 
   onUp(e) {
-    if (e.pointerType === 'pen') { this._penAt = performance.now(); this._penSp = this.surface.screenPoint(e); }
+    if (e.pointerType === 'pen') { this._penAt = performance.now(); this._penSp = this.surface.screenPoint(e); this._mouseSp = null; }
     if (this.rightPan && e.pointerId === this.rightPan.id) {
       const moved = this.rightPan.moved;
       this.rightPan = null;
@@ -500,20 +844,32 @@ export class Interaction {
         return;
       }
     }
+    if (e.pointerId === this._holdId) this.cancelHold();
     this.pointers.delete(e.pointerId);
     if (this.secondaryPan && e.pointerId === this.secondaryPan.id) { this.secondaryPan = null; return; }
     if (this.pinch) { if (this.pointers.size < 2) this.pinch = null; return; }
     if (this.pageSwipe) { if (this.pointers.size < 2) this.pageSwipe = null; return; }
     const a = this.action;
-    if (!a) return;
+    if (!a || (this.actionId != null && e.pointerId !== this.actionId)) return;
     this.stopEdgePan();
     this.lastMotion = null;
     const sp = this.surface.screenPoint(e);
     const wp = this.surface.cam.toWorld(sp.x, sp.y);
 
+    if (a.cover && a.downSp && Math.hypot(sp.x - a.downSp.x, sp.y - a.downSp.y) < TAP_SLOP) {
+      // A tap, not a drag: whatever the pointer nudged on its way down goes
+      // back where it was, and the only change is the cover coming off.
+      if (a.type === 'move') { this.store.restoreSnapshot(a.snap); a.type = 'tapped'; }
+      this.app.revealCurtain(a.cover.id);
+    }
+
     switch (a.type) {
       case 'laser': break;            // the trail fades on its own
-      case 'draw': this.finishStroke(a); break;
+      case 'draw':
+        // A tap can dismiss a selection, or pick something up with a finger.
+        // Neither should become ink or an undo entry. See tappedAnObject().
+        if (!this.tappedAnObject(a, e)) this.finishStroke(a);
+        break;
       case 'erase': this.finishErase(a); break;
       case 'marquee': {
         const box = normalizeBox({ x: a.start.x, y: a.start.y, w: a.cur.x - a.start.x, h: a.cur.y - a.start.y });
@@ -528,7 +884,18 @@ export class Interaction {
       }
       case 'move': {
         const moved = Math.hypot(wp.x - a.start.x, wp.y - a.start.y) * this.surface.cam.z;
-        if (!a.transient && moved < TAP_SLOP && a.tapId) this.app.setSelection([a.tapId], false);
+        /*
+         * A click that did not travel means "just this one", and collapses a
+         * multi-selection down to whatever was under the cursor. That is right
+         * for a plain click and completely wrong for a Ctrl-click: gathering
+         * four things up and watching the selection snap back to the last one
+         * on mouse-up is exactly what made Ctrl-click look broken. A click
+         * that was adding says so, and is left alone.
+         */
+        if (!a.transient && !a.additive && moved < TAP_SLOP && a.tapId) {
+          this.app.setSelection([a.tapId], false);
+        }
+        this.releaseFromCovers(a.snap);
         this.store.commitSnapshot('move', a.snap);
         break;
       }
@@ -564,7 +931,7 @@ export class Interaction {
     if (!box) return null;
     const hp = handlePositions(box);
     for (const k of [...HANDLES, 'rot'])
-      if (Math.hypot(hp[k].x - sp.x, hp[k].y - sp.y) <= HANDLE_GRAB) return k;
+      if (Math.hypot(hp[k].x - sp.x, hp[k].y - sp.y) <= (this._lastDownType === 'touch' ? 22 : HANDLE_GRAB)) return k;
     return null;
   }
 
@@ -599,6 +966,149 @@ export class Interaction {
    * Begin dragging the existing selection if `wp` is inside it.
    * Used by the lasso tool so a selection can be moved without switching tools.
    */
+  /**
+   * Start the clock on a press-and-hold, if this could be one.
+   *
+   * A finger or stylus can select an object without leaving the ink tool.
+   * This also covers a finger set to pan, where touching an object begins
+   * a transient move. A quick tap or a stroke keeps its usual meaning.
+   */
+  armHoldToMove(e, sp, wp) {
+    this.cancelHold();
+    // A finger or a stylus. A mouse has a right button and does not need this.
+    if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return;
+    // Bare board first, and before the test below. That test asks whether this
+    // could become "pick the object up", which is a question about drawing and
+    // panning - so with Select in hand it said no, and the board menu was
+    // unreachable under the one tool people most expect it from.
+    const hit = pick(this.store, wp, 8 / this.surface.cam.z);
+    if (!hit) { this.armHoldOnBoard(e, sp, wp); return; }
+    const eligible = () => this.action && (this.action.type === 'draw' || this.action.type === 'pan'
+      || this.action.type === 'shapeDraw'
+      || (this.action.type === 'move' && this.action.transient));
+    // A drawing finger, or a panning one. Once the finger stopped drawing and
+    // started moving the board, "hold it to pick it up" was the only way left
+    // to get hold of an object without going to the toolbar - so it has to
+    // work from a pan too, not just from a stroke.
+    if (!eligible()) return;
+    this._holdFrom = sp;
+    this._holdId = e.pointerId;
+    this._hold = setTimeout(() => {
+      this._hold = null;
+      // The finger may have lifted, begun a real stroke, or dragged the board
+      // away in the meantime.
+      if (!eligible()) return;
+      // The mark never becomes an object, so there is nothing to undo. A pan
+      // has moved nothing either - the slop check above cancels the hold long
+      // before the board travels far enough to notice.
+      this.surface.wet = null;
+      this.surface.wetPieces = null;
+      this.action = null;
+      this.app.setSelection([hit.id]);
+      if (hit.locked) this.action = { type: 'holdSelect' };
+      else if (!this.startMoveOnSelection(wp)) { this.actionId = null; return; }
+      this.actionId = this._holdId;
+      this.action.holdMenu = true;
+      if (document.documentElement?.dataset.platform !== 'android') this.app.showContextMenu(e);
+      // A hidden gesture nobody is told about is a gesture nobody uses.
+      this.app.toast(hit.locked ? t('Locked — choose Unlock to resize or move') : t('Selected — drag a handle to resize'), 'check', 1400);
+      this.surface.invalidate();
+    }, e.pointerType === 'pen' ? PEN_HOLD_MS : HOLD_MS);
+  }
+
+  /**
+   * Abandon whatever is being drawn right now, leaving nothing behind.
+   *
+   * A shape or a text box being dragged out has not been added to the board
+   * yet - it lives in `action` and is painted as a preview - so dropping the
+   * action is genuinely all it takes, with no undo entry because nothing was
+   * ever committed. A stroke is different: the ink already exists as a wet
+   * path, so that is thrown away too.
+   *
+   * Returns true when there was something to abandon.
+   */
+  cancelGesture() {
+    if (!this.action) return false;
+    /*
+     * Only a gesture that is actually happening can be abandoned.
+     *
+     * An action left behind by a pointer that never reported lifting - a pen
+     * lifted as the window lost focus, a cancel routed elsewhere - would
+     * otherwise sit there and eat the next Escape, so pressing it did nothing
+     * visible and the selection stayed put. onDown already clears such stragglers
+     * when the next press arrives; this refuses to act on one in the meantime.
+     */
+    if (!this.pointers.size) return false;
+    const kind = this.action.type;
+    if (kind === 'move' || kind === 'resize' || kind === 'rotate') {
+      // These have already moved things on screen; put them back.
+      if (this.action.snap) this.store.restoreSnapshot(this.action.snap);
+    }
+    this.surface.wet = null;
+    this.surface.wetPieces = null;
+    this.action = null;
+    this.actionId = null;
+    this.cancelHold();
+    this.app.syncUI();
+    this.surface.invalidate();
+    return ['shapeDraw', 'textDraw', 'draw', 'lasso', 'marquee', 'move', 'resize', 'rotate'].includes(kind);
+  }
+
+  /**
+   * Press and hold on bare board: the menu a finger has no other way to reach.
+   *
+   * Right-clicking empty board has always opened a menu - Paste, Select all,
+   * a sticky note here, templates, the background. A finger has no right
+   * button, so on a touch screen that entire menu was behind a door with no
+   * handle, and pasting in particular had no way in at all.
+   *
+   * A finger or a stylus, and only one of them at a time. The stylus waits
+   * longer than the finger does - holding the nib still is also how a careful
+   * line starts, so it gets the same unhurried threshold the hold-to-select
+   * gesture already uses. A palm arriving beside a working pen is dropped
+   * before it ever reaches here, but a palm that lands FIRST would not be, so
+   * the count and the type are checked again when the timer fires rather than
+   * only when it starts. A second pointer means a pinch, and a pinch must
+   * never end in a menu.
+   *
+   * The cost is a held fingertip on bare canvas, which is how you draw a dot.
+   * The mark is thrown away rather than committed, so the dot is lost but
+   * nothing lands in the undo history to puzzle over - the same bargain the
+   * hold-to-select gesture on an object already makes.
+   */
+  armHoldOnBoard(e, sp, wp) {
+    if (e.pointerType !== 'touch' && e.pointerType !== 'pen') return;
+    if (this.pointers.size !== 1) return;
+    /*
+     * No test of what the press started, deliberately. Select begins a
+     * marquee, the eraser begins a rub, a pen begins a stroke, the hand begins
+     * a pan - and none of those is a thing anybody is committed to after
+     * holding perfectly still on empty canvas. Listing the permitted ones is
+     * how this gesture came to work under some tools and not others. Movement
+     * still cancels it, which is the check that actually matters.
+     */
+    this._holdFrom = sp;
+    this._holdId = e.pointerId;
+    this._hold = setTimeout(() => {
+      this._hold = null;
+      // Checked again here, not only above: a palm can land first and the pen
+      // follow, and by now this may be one of two pointers rather than one.
+      const only = [...this.pointers.values()];
+      if (only.length !== 1 || only[0].type !== e.pointerType) return;
+      this.discardTapMark();
+      this.app.setSelection([]);
+      this._boardMenuAt = Date.now();
+      this.app.showContextMenu(e);
+      this.surface.invalidate();
+    }, e.pointerType === 'pen' ? PEN_HOLD_MS : HOLD_MS);
+  }
+
+  /** Whatever this was, it is not a press-and-hold. */
+  cancelHold() {
+    if (this._hold) { clearTimeout(this._hold); this._hold = null; }
+    this._holdFrom = null;
+  }
+
   startMoveOnSelection(wp) {
     const sel = this.surface.selection;
     if (!sel.size || this.surface.selectionIsLocked()) return false;
@@ -629,11 +1139,26 @@ export class Interaction {
       return;
     }
     if (hit) {
-      let ids;
+      const additive = e.shiftKey || e.ctrlKey || e.metaKey || this.app.multiSelect;
       if (e.shiftKey || e.ctrlKey || e.metaKey) {
-        ids = new Set(sel);
-        ids.has(hit.id) ? ids.delete(hit.id) : ids.add(hit.id);
-        this.app.setSelection([...ids], false);
+        /*
+         * Add this to the selection, or take it back out.
+         *
+         * A grouped object goes in and out as a whole group, and the result is
+         * set without the usual widening - otherwise removing one member would
+         * be undone on the spot by the group being re-added, and a group could
+         * be put into a selection but never taken out of it again.
+         */
+        const ids = new Set(sel);
+        const family = withGroups(this.store, [hit.id], this.app.openGroup);
+        const alreadyIn = family.every((id) => ids.has(id));
+        for (const id of family) alreadyIn ? ids.delete(id) : ids.add(id);
+        this.app.setSelection([...ids], false, { whole: false });
+        // Taking something out is not the start of a drag; leaving the move
+        // armed here meant a shaky hand dragged everything still selected.
+        if (alreadyIn) return;
+      } else if (this.app.multiSelect) {
+        if (this.app.chooseObject(hit.id) === 'removed') return;
       } else if (!sel.has(hit.id)) {
         this.app.setSelection([hit.id], false);
       }
@@ -641,7 +1166,7 @@ export class Interaction {
         .map((id) => this.store.get(id)).filter(Boolean).filter((o) => !o.locked);
       if (!objs.length) return;
       this.action = {
-        type: 'move', start: wp, objs,
+        type: 'move', start: wp, objs, additive,
         snap: this.store.snapshot(objs.map((o) => o.id)),
         origin: new Map(objs.map((o) => [o.id, { ...boundsOf(o) }])),
         tapId: hit.id
@@ -649,8 +1174,12 @@ export class Interaction {
       return;
     }
 
-    if (!e.shiftKey) this.app.setSelection([], false);
-    this.action = { type: 'marquee', start: wp, cur: wp, additive: e.shiftKey };
+    // Dragging a box over empty board. The same keys that add one object at a
+    // time add a boxful, because having to remember which key does which is
+    // the sort of detail that makes people give up and start again.
+    const extend = e.shiftKey || e.ctrlKey || e.metaKey;
+    if (!extend) this.app.setSelection([], false);
+    this.action = { type: 'marquee', start: wp, cur: wp, additive: extend };
   }
 
   /* ------------------------------------------------------------ *
@@ -711,15 +1240,166 @@ export class Interaction {
     // starting in the gutter is drawing on the desk: nothing happens
     const sheet = this.sheetAt(wp);
     if (this.pages.length && !sheet) return;
-    const first = this.snapToRuler({ ...wp, p: this.pressure(e) }, null);
-    obj.points.push(first);
+    // Whether this stroke is a RULED one is decided here, once, by where it
+    // starts - and so is which of the ruler's two edges it belongs to. See
+    // snapToRuler() for why that cannot be left to the points as they arrive.
+    const startEdge = this.ruler.visible && this.ruler.snap ? this.rulerEdgeAt(wp) : null;
+    const act = { type: 'draw', obj, snapAxis: null, sheet,
+      ruled: startEdge !== null, ruledEdge: startEdge || 0 };
+    obj.points.push(this.snapToRuler({ ...wp, p: this.pressure(e) }, act));
     this.surface.wet = obj;
-    this.action = { type: 'draw', obj, snapAxis: null, sheet };
+    this.action = act;
+  }
+
+  /**
+   * Did this stroke turn out to be a tap on selection controls?
+   *
+   * With an ink tool chosen, touching the board draws - which is right, and is
+   * how a whiteboard has to behave on a tablet where the finger is the pen.
+   * But it made the objects on the board untouchable. Tapping a note to write
+   * in it left a dot on the note instead, and the only way to get at anything
+   * was to go to the toolbar, choose Select, tap the thing, and go back. On a
+   * phone, where the toolbar is already a scroll away, that is most of the
+   * work of using the app.
+   *
+   * A tap is not a stroke. It has no length: it goes down and comes up in the
+   * same place, which no deliberate mark does except a full stop - and a full
+   * stop landing exactly on top of an existing object is rare enough, and
+   * cheap enough to redo, to be worth trading.
+   *
+   * A pen or mouse can also tap outside a selection to put it away. Inside
+   * the selected object, or with nothing selected, their dots remain ink.
+   * Fingers additionally pick up an object or open its text for editing.
+   *
+   * Returns true when it dealt with the tap, and the caller should not turn it
+   * into ink.
+   */
+  tappedAnObject(a, e) {
+    const finger = e.pointerType === 'touch';
+    const selected = a.selectionAtDown;
+    const pts = a.obj && a.obj.points;
+    if (!pts || !pts.length) return false;
+
+    // No length: every point within a few pixels of where it started.
+    const z = this.surface.cam.z;
+    const slop = TAP_SLOP / z;
+    const p0 = pts[0];
+    for (const q of pts) if (Math.hypot(q.x - p0.x, q.y - p0.y) > slop) return false;
+
+    /*
+     * A tap on an answer cover lifts it, with whatever is in your hand.
+     *
+     * This is the moment the cover exists for: the class has had a go, and
+     * the teacher - pen in hand, mid-lesson - touches it to show the answer.
+     * Making them go and find the Select tool first would turn a reveal into
+     * a fumble. The pen only loses its full stop, and only on a cover.
+     */
+    const cover = curtainAt(this.store, p0, 8 / z);
+    if (cover) {
+      this.discardTapMark();
+      this.app.revealCurtain(cover.id);
+      this.surface.invalidate();
+      return true;
+    }
+    if (!finger && !selected?.size) return false;
+
+    const hit = pick(this.store, p0, 8 / z);
+
+    if (!finger) {
+      if (hit && selected.has(hit.id)) return false;
+      this.discardTapMark();
+      this.app.setSelection([]);
+      this.surface.invalidate();
+      return true;
+    }
+
+    // Tapped bare board. With something selected, the floating toolbar is
+    // sitting over the board and the tap means "put that away" - which is what
+    // a tap on empty space means in every other app. Clearing the selection
+    // hides the bar (see updateSelectionBar). With nothing selected there is
+    // nothing to dismiss, so a dot is a dot.
+    if (!hit) {
+      if (!selected?.size && !this.surface.selection.size) return false;
+      this.discardTapMark();
+      this.app.setSelection([]);
+      this.surface.invalidate();
+      return true;
+    }
+
+    this.discardTapMark();
+
+    if (hit.locked) { this.app.setSelection([hit.id]); this.app.hintLocked(); return true; }
+
+    const how = this.app.chooseObject(hit.id);
+    // While several are being gathered up, a tap means "this one as well" and
+    // nothing more - opening the keyboard on top of that would be a surprise.
+    if (how !== 'replaced') { this.surface.invalidate(); return true; }
+    // Something with words in it opens for writing; everything else is simply
+    // picked up, which is what a tap on a picture should do.
+    if (['note', 'text', 'shape', 'table'].includes(hit.type)) {
+      this.app.armToolRestore();
+      this.app.setTool('select');
+      this.app.beginTextEdit(hit);
+    }
+    this.surface.invalidate();
+    return true;
+  }
+
+  /**
+   * Throw a tap's mark away before it becomes an object, so it never reaches
+   * the board and there is nothing in the undo history to explain either.
+   */
+  discardTapMark() {
+    this.surface.wet = null;
+    this.surface.wetPieces = null;
+    this.action = null;
+    this.actionId = null;
+  }
+
+  /**
+   * The pen came out the other side of the ruler: bank what was drawn before
+   * the plastic and carry on with a fresh mark.
+   *
+   * Kept as separate objects rather than one stroke with a hole in it, because
+   * that is what it is - two marks on the paper with a gap between them - and
+   * because every part of the app that reads a stroke (hit testing, erasing,
+   * straightening, the renderer) would otherwise need to learn about holes.
+   * They are committed together, so one undo still takes the whole line back.
+   */
+  breakStroke(a) {
+    if (a.obj.points.length >= 2) {
+      const piece = { ...a.obj, id: uid('s'), points: a.obj.points,
+        bbox: bboxOfPoints(a.obj.points) };
+      (a.pieces || (a.pieces = [])).push(piece);
+      this.surface.wetPieces = a.pieces;
+    }
+    a.obj.points = [];
   }
 
   finishStroke(a) {
     const obj = a.obj;
     this.surface.wet = null;
+    this.surface.wetPieces = null;
+    /*
+     * A line the ruler cut in two (or three). Each piece is real ink and they
+     * go in together, as one entry in the history - and none of them is offered
+     * to the shape recogniser, because half a circle is not a circle.
+     */
+    if (a.pieces && a.pieces.length) {
+      const tidy = (o) => {
+        o.points = o.points.map((q) => ({
+          x: +q.x.toFixed(2), y: +q.y.toFixed(2), p: +(q.p ?? 0.5).toFixed(2)
+        }));
+        o.bbox = bboxOfPoints(o.points);
+        o.attachedTo = this.lockedHostFor(o) || undefined;
+        return o;
+      };
+      const all = a.pieces.map(tidy);
+      if (obj.points.length >= 2) all.push(tidy(obj));
+      this.store.addMany(all, 'draw');
+      for (const o of all) this.surface.extendFreeze?.(o);
+      return;
+    }
     if (obj.points.length < 2) {
       const p = obj.points[0];
       obj.points = [p, { x: p.x + 0.6, y: p.y + 0.6, p: p.p }];
@@ -747,6 +1427,15 @@ export class Interaction {
     // the shape was the only thing ever added to the document.
     this.store.add(obj, 'draw');
 
+    /*
+     * Add the finished stroke to the frozen copy of the board rather than
+     * letting the commit above make that copy stale. Writing a word is a dozen
+     * strokes with a lift between each - more so if you print rather than join
+     * your letters - and without this every one of them repainted the whole
+     * board before it could draw a thing.
+     */
+    this.surface.extendFreeze?.(obj);
+
     if (this.app.settings.inkToShape && obj.tool === 'pen') {
       const r = recognize(obj.points);
       // classified AND actually shaped like the thing it was classified as
@@ -762,8 +1451,14 @@ export class Interaction {
           { t: 'del', id: obj.id, obj: structuredClone(obj), index: this.store.indexOf(obj.id) },
           { t: 'add', obj: shape }
         ]);
+        // the ink we just added to the frozen copy is no longer on the board
+        this.surface._ink = null;
         this.app.setSelection([shape.id]);
-        this.app.toast(`Straightened into a ${r.kind} — undo (Ctrl+Z) keeps your ink`, 'shape', 3600);
+        this.app.toast(t('Straightened into a {kind} — undo (Ctrl+Z) keeps your ink', {
+          // English has always said the plain kind ("a circle"); every other
+          // language gets the shape's proper name from the picker instead
+          kind: currentLanguage() === 'en' ? r.kind : (SHAPE_LABELS[r.kind] || r.kind)
+        }), 'shape', 3600);
       }
     }
   }
@@ -773,12 +1468,15 @@ export class Interaction {
    * Topmost wins, and the item has to sit mostly inside it.
    */
   lockedHostFor(obj) {
+    const cover = this.coverFor(obj);
+    if (cover) return cover;
     const b = worldBounds(obj);
     const area = Math.max(1, b.w * b.h);
     const order = this.store.doc.order;
     for (let i = order.length - 1; i >= 0; i--) {
       const host = this.store.doc.objects[order[i]];
-      if (!host || !host.locked || host.id === obj.id) continue;
+      // a cover claims ink by its own, stricter rule - coverFor() above
+      if (!host || !host.locked || host.id === obj.id || host.type === 'curtain') continue;
       const hb = worldBounds(host);
       const ox = Math.max(0, Math.min(b.x + b.w, hb.x + hb.w) - Math.max(b.x, hb.x));
       const oy = Math.max(0, Math.min(b.y + b.h, hb.y + hb.h) - Math.max(b.y, hb.y));
@@ -788,6 +1486,64 @@ export class Interaction {
       if ((ox * oy) / area > 0.6 || (centreIn && ox > 0 && oy > 0)) return host.id;
     }
     return null;
+  }
+
+  /**
+   * The answer cover this was written ON, or null.
+   *
+   * Writing on a cover - "Q1", a hint, a circle round it - belongs to the
+   * cover: it moves with it and goes when the cover is lifted, because what
+   * is underneath is the answer and the scribble was only ever on the card.
+   *
+   * The test is strict on purpose, because getting it wrong the other way is
+   * worse. Ink that is swept away with a cover is ink the class never sees.
+   * So a stroke that STARTED off the cover and ran onto it is not the cover's,
+   * and neither is one that starts on it and wanders mostly off it: only a
+   * stroke that begins on the card and stays on it (all but a sliver) goes.
+   * Anything else - a note, a text box, a shape - has to sit wholly inside.
+   */
+  coverFor(obj) {
+    const order = this.store.doc.order;
+    for (let i = order.length - 1; i >= 0; i--) {
+      const c = this.store.doc.objects[order[i]];
+      if (!c || c.type !== 'curtain' || c.revealed || c.id === obj.id) continue;
+      const box = { x: Math.min(c.x, c.x + c.w), y: Math.min(c.y, c.y + c.h), w: Math.abs(c.w), h: Math.abs(c.h) };
+      const inside = (p) => {
+        const q = toLocal(c, p);
+        return q.x >= box.x && q.x <= box.x + box.w && q.y >= box.y && q.y <= box.y + box.h;
+      };
+      if (obj.type === 'stroke') {
+        const pts = obj.points || [];
+        if (!pts.length || !inside(pts[0])) continue;
+        const on = pts.reduce((n, p) => n + (inside(p) ? 1 : 0), 0);
+        if (on / pts.length >= Interaction.ON_COVER) return c.id;
+        continue;
+      }
+      const b = worldBounds(obj);
+      const corners = [{ x: b.x, y: b.y }, { x: b.x + b.w, y: b.y }, { x: b.x, y: b.y + b.h }, { x: b.x + b.w, y: b.y + b.h }];
+      if (corners.every(inside)) return c.id;
+    }
+    return null;
+  }
+
+  /**
+   * After a drag: ink pulled off its cover stops belonging to it.
+   *
+   * Otherwise a scribble moved away from the card would still vanish when the
+   * card is lifted, from somewhere else entirely on the board. Only ever
+   * loosens - ink dragged ONTO a cover is not claimed by it, since what was
+   * already on the board should not start disappearing because it was moved.
+   * Done on the live objects before the move is committed, so the change is
+   * part of the same undo step.
+   */
+  releaseFromCovers(snap) {
+    for (const id of snap.keys()) {
+      const o = this.store.get(id);
+      if (!o || !o.attachedTo || snap.has(o.attachedTo)) continue;
+      const host = this.store.get(o.attachedTo);
+      if (!host || host.type !== 'curtain') continue;
+      if (this.coverFor(o) !== host.id) o.attachedTo = undefined;
+    }
   }
 
   /* ---------------- erasing ----------------
@@ -854,7 +1610,50 @@ export class Interaction {
         changed = true;
       }
     }
-    if (changed) this.surface.invalidate();
+    /*
+     * Repaint the band the eraser just crossed, not the whole board.
+     *
+     * Three things have to be inside it, or something stale is left on screen:
+     * the segment itself with the eraser's radius around it; the ring where it
+     * was drawn LAST frame, which must be painted over; and the ring where it
+     * is now. The ring is screen chrome drawn after the scene, so if its old
+     * position falls outside the band it stays there as a ghost.
+     *
+     * A generous margin on top, because ink is drawn with a width of its own
+     * and round caps that reach past the centreline.
+     */
+    const ringWorld = (r) => r / this.surface.cam.z;
+    const ringR = ringWorld(a.radiusPx) + 6 / this.surface.cam.z;
+    const boxes = [{
+      x: Math.min(from.x, to.x) - r - 4,
+      y: Math.min(from.y, to.y) - r - 4,
+      w: Math.abs(to.x - from.x) + (r + 4) * 2,
+      h: Math.abs(to.y - from.y) + (r + 4) * 2
+    }, {
+      x: to.x - ringR, y: to.y - ringR, w: ringR * 2, h: ringR * 2
+    }];
+    if (a.lastRing) {
+      boxes.push({ x: a.lastRing.x - a.lastRing.r, y: a.lastRing.y - a.lastRing.r,
+        w: a.lastRing.r * 2, h: a.lastRing.r * 2 });
+    }
+    a.lastRing = { x: to.x, y: to.y, r: ringR };
+    let band = boxes[0];
+    for (const b of boxes.slice(1)) {
+      const x = Math.min(band.x, b.x), y = Math.min(band.y, b.y);
+      const x2 = Math.max(band.x + band.w, b.x + b.w), y2 = Math.max(band.y + band.h, b.y + b.h);
+      band = { x, y, w: x2 - x, h: y2 - y };
+    }
+    /*
+     * One case takes the whole board anyway: something is selected.
+     *
+     * Selection chrome is drawn over the scene every frame and is partly
+     * see-through. Painting it on top of itself without the pixels underneath
+     * being cleared first would darken it a little more each frame. It is a
+     * rare thing to be erasing with a selection live, and correct beats fast.
+     */
+    if (this.surface.invalidateBand && !this.surface.selection.size) {
+      this.surface.invalidateBand(band);
+    } else this.surface.invalidate();
   }
 
   finishErase(a) {
@@ -902,14 +1701,28 @@ export class Interaction {
       if (Math.hypot(geo.w, geo.h) < 6) return;
     } else {
       geo = normalizeRect(a.start, a.cur, a.shift);
-      if (geo.w < 6 || geo.h < 6) { geo = { x: a.start.x - 60, y: a.start.y - 45, w: 120, h: 90 }; }
+      // A tap makes a default-sized shape, which is a convenience - unless the
+      // tap was only there to put a menu away, in which case it is litter.
+      if (geo.w < 6 || geo.h < 6) {
+        if (a.dismissedMenu) return;
+        geo = { x: a.start.x - 60, y: a.start.y - 45, w: 120, h: 90 };
+      }
     }
     const obj = {
       id: uid('sh'), type: 'shape', kind, ...geo, rotation: 0,
       stroke: s.shapeStroke, fill: s.shapeFill, lineWidth: s.shapeLineWidth, dash: s.shapeDash, text: ''
     };
     this.store.add(this.placeOnPaper(obj), 'shape');
-    if (this.app.settings.returnToSelect) this.app.setTool('select');
+    /*
+     * Stay on the shape tool.
+     *
+     * A note or a text box is one-and-done: you drop it, you type in it, and
+     * what you want next is to move or resize the thing you just made - so
+     * those still follow the "return to select" setting. Shapes arrive in
+     * batches. Three boxes and two arrows is one diagram, and going back to
+     * the menu between each of them is four trips nobody asked for. The new
+     * shape is selected either way, so its handles are right there.
+     */
     this.app.setSelection([obj.id]);
   }
 
@@ -933,6 +1746,7 @@ export class Interaction {
 
   finishTextBox(a) {
     const w = Math.abs(a.cur.x - a.start.x), h = Math.abs(a.cur.y - a.start.y);
+    if (a.dismissedMenu && w < 6 && h < 6) return;   // that tap only shut a menu
     const s = this.app.settings;
     const fontSize = this.app.worldSize(s.textSize);
     const box = w > 20 && h > 12
@@ -1012,8 +1826,42 @@ export class Interaction {
   /** Take the nib off screen without disturbing the board. */
   hideInkPointer() {
     this.inkPointer = null;
+    this.cancelNibHide();
     const el = this.nibEl();
     if (el && !el.hidden) el.hidden = true;
+  }
+
+  /**
+   * Hide the nib layer one frame from now, rather than this instant.
+   *
+   * See the handover note in showInkPointer(): this exists so the system
+   * cursor has a frame to arrive before our own copy goes away. Where there is
+   * no requestAnimationFrame to wait for, hide at once - late is better than
+   * never, and a stray nib is worse than a blink.
+   */
+  hideInkPointerNextFrame(sp = null, t = this.tool) {
+    this.inkPointer = null;
+    const el = this.nibEl();
+    if (!el || el.hidden) return;
+    // Drag it along on the way out. Every hover move between the pen lifting
+    // and this hide actually landing comes through here, so on a slow frame the
+    // copy tracks the pointer rather than marking where the stroke stopped.
+    if (sp) this.placeNib(el, sp, t);
+    if (typeof requestAnimationFrame !== 'function') { el.hidden = true; return; }
+    if (this._nibHideRaf) return;                 // one pending hide is enough
+    this._nibHideRaf = requestAnimationFrame(() => {
+      this._nibHideRaf = 0;
+      // A new stroke may have begun inside that frame. It owns the layer now,
+      // and inkPointer is how we can tell.
+      if (!this.inkPointer && !el.hidden) el.hidden = true;
+    });
+  }
+
+  /** Drop a pending deferred hide - the layer is wanted again. */
+  cancelNibHide() {
+    if (!this._nibHideRaf) return;
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this._nibHideRaf);
+    this._nibHideRaf = 0;
   }
 
   /** The CSS cursor an ink tool should carry, given that choice. */
@@ -1053,40 +1901,100 @@ export class Interaction {
      */
     const drawing = !!(this.action && this.action.type === 'draw');
     const chosen = this.inkPointerKind();
+
+    /*
+     * A finger is its own pointer, and it does not want a nib.
+     *
+     * Everything above is about a stylus, where the tip is a millimetre wide
+     * and the hand is somewhere else. A fingertip already covers the spot it is
+     * marking: a nib drawn under it is hidden by the finger at best, and at
+     * worst it is a second object sliding around the board that nobody asked
+     * for. There is no hover on a touch screen either, so between strokes it
+     * has nothing to point at and simply sits there.
+     *
+     * So no nib for a finger, on any machine. A pen or a mouse on the same
+     * machine is untouched - a Surface still gets its nib under the stylus.
+     * Someone who wants one under their finger as well turns on the setting.
+     */
+    if (deviceType === 'touch' && !this.app.settings.nibOnTouch) {
+      this.setCursor(chosen === 'nib' ? this.inkCursor(t) : this.inkPointerCursor(t));
+      this.hideInkPointer();
+      return;
+    }
     // Only the NIB falls back to the system cursor outside a stroke. Someone who
     // asked for an arrow or a crosshair gets it whatever the pen is doing.
     const kind = (chosen === 'nib' && (deviceType === 'mouse' || !drawing)) ? 'css-nib' : chosen;
     if (kind !== 'nib') {
-      this.hideInkPointer();
+      /*
+       * The order of these two lines is the whole fix, and it used to be the
+       * wrong way round.
+       *
+       * Hiding our layer and asking for the system cursor are not the same kind
+       * of act. The cursor appears when Windows gets round to it; the layer
+       * disappears at the next composited frame. Hiding first therefore opened a
+       * window with NO nib on screen at all - one frame on an idle machine,
+       * several when something like a screen recorder is eating the frame
+       * budget. That was the blink at the end of every stroke, and it only ever
+       * showed up under a stylus: a mouse never hands over, because Windows only
+       * takes its pointer away for a pen.
+       *
+       * Cursor first, layer a frame later. Both nibs are up for that frame -
+       * same glyph, same hotspot - and the layer is MOVED to the pointer on the
+       * way out, which is the part that makes the overlap invisible instead of
+       * merely brief.
+       *
+       * Leaving it parked where the stroke ended was wrong, and only wrong when
+       * a frame is slow. On an idle machine the hide lands in sixteen
+       * milliseconds and nobody could see the stale copy. Put a screen recorder
+       * on the machine and that frame stretches to a tenth of a second, during
+       * which the hand has moved on and there are visibly TWO nibs: the system
+       * cursor under the pen where it belongs, and ours still sitting back at
+       * the last full stop. It reads as the nib reappearing in the wrong place
+       * after every stroke and then catching up - which is exactly what someone
+       * writing Bengali on a Wacom under Zoom reported, and they were right.
+       */
       this.setCursor(kind === 'css-nib' ? this.inkCursor(t) : this.inkPointerCursor(t));
+      this.hideInkPointerNextFrame(sp, t);
       return;
     }
     const el = this.nibEl();
     if (!el) { this.setCursor(this.inkCursor(t)); return; }
 
+    // A hide left pending by the last stroke must not fire into this one.
+    this.cancelNibHide();
     this.setCursor('none');
     this.inkPointer = sp;
 
+    this.placeNib(el, sp, t);
+    if (el.hidden) el.hidden = false;
+  }
+
+  /**
+   * Put the nib layer under a screen point, tinted for the tool.
+   *
+   * The one thing here that has to stay cheap is the transform. On a promoted
+   * layer the compositor handles it: no layout, no paint, and the board is not
+   * touched. Rounded to whole pixels so the glyph never lands half way across
+   * one and blurs.
+   */
+  placeNib(el, sp, t) {
     const s = this.app.settings;
     const hl = t === 'highlighter';
     const url = inkGlyphUrl(hl ? 'highlighter' : 'pen', hl ? s.highlighterColor : s.penColor);
     if (this._nibUrl !== url) { this._nibUrl = url; el.style.backgroundImage = url; }
-
-    // The one line that has to stay cheap. A transform on a promoted layer is
-    // handled by the compositor: no layout, no paint, and the board is not
-    // touched. Rounded to whole pixels so the glyph never lands half way across
-    // one and blurs.
     const hot = inkGlyphHotspot(hl ? 'highlighter' : 'pen');
     el.style.transform = 'translate3d(' + Math.round(sp.x - hot.x) + 'px,'
       + Math.round(sp.y - hot.y) + 'px,0)';
-    if (el.hidden) el.hidden = false;
   }
 
   /** The pen/highlighter cursor, tinted with the colour the tool is loaded with. */
   inkCursor(tool) {
     const s = this.app.settings;
+    // The nib shows the ink. On a dark board the default ink is light, so a
+    // black nib is the same small lie the tray and the swatches were telling:
+    // it says one thing and the pen does another.
     return inkCursor(tool === 'highlighter' ? 'highlighter' : 'pen',
-      tool === 'highlighter' ? s.highlighterColor : s.penColor);
+      tool === 'highlighter' ? s.highlighterColor : inkPaint(s.penColor));
   }
 
   updateHover(sp, wp, deviceType = 'mouse') {
@@ -1130,14 +2038,41 @@ export class Interaction {
       return;
     }
 
+    const hoverWas = this.surface.hoverId;
     if (t === 'select' || t === 'lasso') {
       const hit = pick(this.store, wp, 8 / this.surface.cam.z);
       this.surface.hoverId = hit ? hit.id : null;
       if (t === 'select') cursor = hit ? (hit.locked ? 'not-allowed' : 'move') : 'default';
     } else this.surface.hoverId = null;
+    // Moving onto or off a grouped object changes what the chrome should show,
+    // and nothing else on a plain hover would ask for a repaint.
+    if (this.surface.hoverId !== hoverWas) this.surface.invalidate();
 
-    if (this.ruler.visible && this.rulerZone(sp)) cursor = this.rulerZone(sp) === 'rotate' ? 'grab' : 'move';
-    if (t === 'eraser') { this.eraserCursor = sp; this.surface.invalidate(); }
+    if (this.ruler.visible) {
+      const zone = this.rulerZone(sp);
+      // Only the parts that actually do something say so. The body under a pen
+      // draws, and a "move" cursor over it would be the same old lie.
+      if (zone === 'rotate') cursor = 'grab';
+      else if (zone === 'move') cursor = 'move';
+      else if (zone === 'body' && (deviceType === 'touch' || t === 'select' || t === 'pan')) cursor = 'move';
+    }
+    if (t === 'eraser') {
+      // The hover ring, when no button is down. Only the ring moved, so only
+      // where it was and where it is now need repainting - on a heavy board
+      // that is the difference between a ring that glides and one that stutters.
+      const prev = this.eraserCursor;
+      this.eraserCursor = sp;
+      const rPx = this.app.settings.eraserSize / 2 + 6;
+      const z = this.surface.cam.z;
+      const boxOf = (p) => { const w = this.surface.cam.toWorld(p.x - rPx, p.y - rPx);
+        return { x: w.x, y: w.y, w: (rPx * 2) / z, h: (rPx * 2) / z }; };
+      if (prev && this.surface.invalidateBand) {
+        const a = boxOf(prev), b = boxOf(sp);
+        const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+        this.surface.invalidateBand({ x, y,
+          w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y });
+      } else this.surface.invalidate();
+    }
     this.setCursor(cursor);
   }
 
@@ -1241,6 +2176,7 @@ export class Interaction {
 
   static ERASER_MAX_GROWTH = 1.8;      // up to 2.8x the chosen size
   static ERASER_GROWTH_SPAN = 900;     // world units of scrubbing to reach it
+  static ON_COVER = 0.85;              // share of a stroke that must lie on a cover to be written ON it
 
   static EDGE_MARGIN = 56;
   static EDGE_MAX_SPEED = 16;
@@ -1326,10 +2262,24 @@ export class Interaction {
   }
 
   startPinch() {
+    this.cancelHold();
     if (this.action && this.action.type === 'draw') {
       this.surface.wet = null;
+      this.surface.wetPieces = null;
       this.action = null;
     } else if (this.action) this.action = null;
+    /*
+     * And forget which pointer owned it.
+     *
+     * The gesture is gone; the name of the finger that started it is not, and
+     * a leftover owner poisons everything that comes after. Both of the lifts
+     * that end a pinch leave through the early return below, so nothing else
+     * clears it: the board is then left answering only to a finger that is no
+     * longer on the glass. Pressing the ruler after that did nothing at all -
+     * it took the press, moved nothing, and stayed stuck that way until you
+     * drew something, because drawing is the one path that names a new owner.
+     */
+    this.actionId = null;
     const [a, b] = [...this.pointers.values()];
     this.pinch = {
       d0: Math.hypot(a.sp.x - b.sp.x, a.sp.y - b.sp.y) || 1,
@@ -1359,9 +2309,21 @@ export class Interaction {
       if (this.tool === 'select') { this.app.setTool('text'); this.action = null; }
       return;
     }
+    // A cover lifts on a double-click whatever else is true of it. Locked
+    // covers are the norm, since nobody wants one nudged mid-lesson.
+    if (hit.type === 'curtain') { this.app.revealCurtain(hit.id); return; }
     // only the picking tools own selection chrome
     if (this.tool !== 'pen' && this.tool !== 'highlighter') this.app.setSelection([hit.id]);
     if (hit.locked) { this.app.setSelection([hit.id]); this.app.hintLocked(); return; }
+    // A double-click on something grouped steps INTO the group and takes hold
+    // of the one piece, rather than editing its text. Double-click again and
+    // the text opens as usual, because by then the group is already open and
+    // the piece is what got picked. That second step is what keeps a grouped
+    // sticky note editable without pulling the group apart first.
+    if (hit.groupId && this.app.openGroup !== hit.groupId) {
+      this.app.enterGroup(hit);
+      return;
+    }
     if (hit.type === 'note' || hit.type === 'text' || hit.type === 'shape') {
       this.app.setSelection([hit.id]);
       this.app.beginTextEdit(hit);
@@ -1381,31 +2343,160 @@ export class Interaction {
     return { c, len: r.length * z, thick: r.thickness * z, angle: r.angle };
   }
 
+  /** Where the grip that always moves the ruler sits, in ruler coordinates. */
+  static MOVE_GRIP = { halfLen: 34, pad: 11 };
+
+  /*
+   * The turning knob: how far in from each end it sits, and how big it is.
+   *
+   * There is one at BOTH ends. A ruler on a phone is usually longer than the
+   * screen, so whichever end happens to be in view has to be the one you can
+   * turn it by; having the only knob off the edge of the screen is the same as
+   * having no knob at all.
+   */
+  static ROTATE_KNOB = { inset: 14, r: 9 };
+
+  /** Finger-sized targets on a touchscreen, mouse-sized under a mouse. */
+  get coarsePointer() {
+    return typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+  }
+
   rulerZone(sp) {
     const { c, len, thick, angle } = this.rulerRect();
     const dx = sp.x - c.x, dy = sp.y - c.y;
     const along = dx * Math.cos(angle) + dy * Math.sin(angle);
     const perp = -dx * Math.sin(angle) + dy * Math.cos(angle);
-    if (Math.abs(along - len / 2) < 16 && Math.abs(perp) < thick) return 'rotate';
+    /*
+     * The knob is DRAWN 14px in from the end, and the old target sat 14px
+     * further out than that, centred on the end of the ruler itself. So half
+     * of the blue dot you were aiming at did nothing, and the part that
+     * worked was invisible. Aim at what is painted, and give a fingertip
+     * room to miss by a few pixels.
+     */
+    const kb = Interaction.ROTATE_KNOB;
+    const reach = this.coarsePointer ? 24 : 15;
+    for (const end of [1, -1]) {
+      const kx = end * (len / 2 - kb.inset);
+      if (Math.hypot(along - kx, perp - thick / 2) < reach) return 'rotate';
+    }
+    /*
+     * A grip in the middle that moves the ruler whatever is being held.
+     *
+     * Dragging the body only worked with the Select or Pan tool - which is to
+     * say, never at the moment anybody wanted it, because you reach for a
+     * ruler while holding a pen. Pressing on it with the pen drew a line
+     * instead, so the ruler could not be moved without putting the pen down,
+     * switching tool, dragging, and switching back. It read as a ruler nailed
+     * to the board, and the toast cheerfully said "drag to move".
+     *
+     * A real ruler is held with the other hand. There is no other hand here,
+     * so there is a handle instead: small, in the middle, visible, and it
+     * always means move - pen, mouse, finger, whatever the tool.
+     */
+    const gr = Interaction.MOVE_GRIP;
+    if (Math.abs(along) < gr.halfLen && perp >= -gr.pad && perp <= thick + gr.pad) return 'move';
     if (Math.abs(along) <= len / 2 && perp >= -2 && perp <= thick) return 'body';
     return null;
   }
 
-  /** Project a point onto the ruler edge when drawing close to it. */
+  /** How far along the ruler's edge a point sits, and how far off it. */
+  rulerOffsets(pt) {
+    const r = this.ruler;
+    const dx = pt.x - r.x, dy = pt.y - r.y;
+    return {
+      along: dx * Math.cos(r.angle) + dy * Math.sin(r.angle),
+      perp: -dx * Math.sin(r.angle) + dy * Math.cos(r.angle)
+    };
+  }
+
+  /**
+   * Which edge of the ruler this point belongs to, or null for well clear of it.
+   *
+   * A ruler has TWO long sides and people use both - the whole reason it gets
+   * rotated to 346 degrees is so one particular side lies where the line is
+   * wanted. Only the top one used to draw, because the ruler's anchor line IS
+   * its top edge and the snap band was measured from that: the far side sat a
+   * full thickness away and never came close enough to catch anything. Drawing
+   * along it gave you your hand's own wobble, next to a perfectly straight line
+   * on the other side, with nothing on screen to explain the difference.
+   *
+   * The middle was worse. A band around each edge would still leave a corridor
+   * up the centre where ink is free, and free ink under a ruler comes out as
+   * pencil lines visible through the plastic - which no ruler has ever done.
+   * So the whole body catches, and the answer is simply whichever side is
+   * nearer. The thing is solid.
+   *
+   * Returned as the offset of that edge from the anchor line: 0 for the near
+   * side, the full thickness for the far one.
+   */
+  rulerEdgeAt(pt) {
+    const r = this.ruler;
+    const z = this.surface.cam.z;
+    const band = 26 / z;                     // a little grace beyond the plastic
+    const { along, perp } = this.rulerOffsets(pt);
+    if (Math.abs(along) > r.length / 2 + 40 / z) return null;   // past the ends
+    if (perp < -band || perp > r.thickness + band) return null; // clear of it
+    return perp < r.thickness / 2 ? 0 : r.thickness;
+  }
+
+  /**
+   * Is this point underneath the plastic itself?
+   *
+   * Not the grace band around the edges - the body, where a real nib simply
+   * cannot reach the paper. A line you drag across a ruler stops at the near
+   * edge and starts again at the far one; it does not reappear inside the
+   * plastic, however see-through the plastic is. This is the body exactly,
+   * because the edges themselves are where ruled lines are supposed to land.
+   */
+  underThePlastic(pt) {
+    const r = this.ruler;
+    if (!r.visible) return false;
+    const { along, perp } = this.rulerOffsets(pt);
+    return Math.abs(along) <= r.length / 2 && perp > 0 && perp < r.thickness;
+  }
+
+  /** The point, moved sideways onto one of the ruler's edges. */
+  rulerProject(pt, edge = 0) {
+    const r = this.ruler;
+    const { along } = this.rulerOffsets(pt);
+    const cos = Math.cos(r.angle), sin = Math.sin(r.angle);
+    return {
+      x: r.x + cos * along - sin * edge,
+      y: r.y + sin * along + cos * edge,
+      p: pt.p
+    };
+  }
+
+  /**
+   * Hold a stroke against the ruler's edge.
+   *
+   * This used to test every point on its own: within 26 pixels of the edge,
+   * snap; further out, draw wherever the hand went. Which meant the ruler only
+   * held a line as steadily as the hand did - a wobble wide enough took the ink
+   * off the edge mid-stroke and left a straight line with a bulge in it. That
+   * is precisely the wobble a ruler exists to absorb, and the person drawing
+   * has no way to see the 26-pixel boundary they are supposed to stay inside.
+   *
+   * A real ruler does not let go. Once the pen is against the edge it stays
+   * against the edge until it is lifted, however much the hand shakes, because
+   * a piece of plastic is in the way. So a stroke that BEGINS on the ruler is
+   * held to the edge it began on for its whole length, at any distance.
+   * Lifting releases it - `action` is a fresh object per stroke, so the latch
+   * cannot outlive one - and the edge is fixed at the start so a stroke can
+   * never hop from one side of the ruler to the other halfway along.
+   *
+   * A stroke that merely RUNS ACROSS the ruler is a different thing and must
+   * not latch: it is deflected while it is against the plastic and let go on
+   * the far side, exactly as a real pen would be. Latching that one would turn
+   * a circle drawn over the ruler into a straight line for the rest of its
+   * length, which is a far worse bug than the one being fixed.
+   */
   snapToRuler(pt, action) {
     const r = this.ruler;
     if (!r.visible || !r.snap) return pt;
-    const z = this.surface.cam.z;
-    const dx = pt.x - r.x, dy = pt.y - r.y;
-    const along = dx * Math.cos(r.angle) + dy * Math.sin(r.angle);
-    const perp = -dx * Math.sin(r.angle) + dy * Math.cos(r.angle);
-    const band = 26 / z;
-    if (Math.abs(perp) > band || Math.abs(along) > r.length / 2 + 40 / z) return pt;
-    return {
-      x: r.x + Math.cos(r.angle) * along,
-      y: r.y + Math.sin(r.angle) * along,
-      p: pt.p
-    };
+    if (action && action.ruled) return this.rulerProject(pt, action.ruledEdge);
+    const edge = this.rulerEdgeAt(pt);
+    return edge === null ? pt : this.rulerProject(pt, edge);
   }
 
   /* ------------------------------------------------------------ *
@@ -1519,6 +2610,9 @@ export class Interaction {
     ctx.save();
     ctx.translate(c.x, c.y);
     ctx.rotate(angle);
+    // Slightly see-through, the way a plastic ruler is. Nothing can be drawn
+    // underneath it any more (see underThePlastic), so there is nothing hiding
+    // down there that needs covering up.
     const g = ctx.createLinearGradient(0, 0, 0, thick);
     g.addColorStop(0, 'rgba(255,255,255,0.92)');
     g.addColorStop(1, 'rgba(233,231,229,0.92)');
@@ -1549,15 +2643,42 @@ export class Interaction {
         if (major && stepPx > 6) ctx.fillText(String(Math.abs(i * stepWorld)), x, 24);
       }
     }
-    // angle readout + rotate grip
+    // The angle readout belongs beside the thing that changes it, not in the
+    // middle of the ruler where the move grip now lives - and where it was
+    // sitting on top of the centre tick's own label besides.
     const degv = ((angle * 180) / Math.PI + 360) % 360;
     ctx.fillStyle = 'rgba(0,0,0,0.75)';
     ctx.font = '11px system-ui, sans-serif';
-    ctx.fillText(degv.toFixed(0) + '°', 0, thick - 8);
+    ctx.fillText(degv.toFixed(0) + '°', len / 2 - 52, thick / 2 + 4);
+    const kb = Interaction.ROTATE_KNOB;
+    const kr = this.coarsePointer ? kb.r + 3 : kb.r;
+    for (const end of [1, -1]) {
+      ctx.beginPath();
+      ctx.arc(end * (len / 2 - kb.inset), thick / 2, kr, 0, Math.PI * 2);
+      ctx.fillStyle = '#0078d4';
+      ctx.fill();
+      // A white ring so the knob reads as a knob and not as a stray dot.
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+    }
+
+    // The move grip. Three lines, the way every drag handle has looked for
+    // thirty years, so nobody has to be told what it is.
+    const gr = Interaction.MOVE_GRIP;
+    ctx.fillStyle = 'rgba(0,0,0,0.06)';
     ctx.beginPath();
-    ctx.arc(len / 2 - 14, thick / 2, 8, 0, Math.PI * 2);
-    ctx.fillStyle = '#0078d4';
+    if (ctx.roundRect) ctx.roundRect(-gr.halfLen, 2, gr.halfLen * 2, thick - 4, 3);
+    else ctx.rect(-gr.halfLen, 2, gr.halfLen * 2, thick - 4);
     ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.42)';
+    ctx.lineWidth = 1.6;
+    for (const dx2 of [-7, 0, 7]) {
+      ctx.beginPath();
+      ctx.moveTo(dx2, thick / 2 - 9);
+      ctx.lineTo(dx2, thick / 2 + 9);
+      ctx.stroke();
+    }
     ctx.restore();
   }
 }

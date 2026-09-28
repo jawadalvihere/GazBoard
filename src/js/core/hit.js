@@ -14,7 +14,20 @@ export function toLocal(o, p) {
   return rotatePoint(p.x, p.y, b.x + b.w / 2, b.y + b.h / 2, -o.rotation);
 }
 
+/**
+ * Is this object there to be touched at all?
+ *
+ * An answer cover that has been lifted is still in the document - that is
+ * what lets undo and "Cover answers again" put it back - but as far as the
+ * pointer is concerned it is gone. Leaving it hittable would make an empty
+ * patch of board mysteriously selectable, and would stop taps reaching the
+ * very answer it was hiding. Ink written ON a cover leaves with it, and is
+ * `hidden` for as long as the cover is lifted - gone from the pointer too.
+ */
+export const ghost = (o) => !!o && (!!o.hidden || (o.type === 'curtain' && !!o.revealed));
+
 export function hitObject(o, p, tol = 6) {
+  if (ghost(o)) return false;
   const lp = toLocal(o, p);
   const b = boundsOf(o);
 
@@ -73,7 +86,7 @@ export function pickAll(store, p, tol = 6, { includeLocked = true } = {}) {
 export function inBox(store, box, contain = false) {
   const b = normalizeBox(box);
   return store.objects.filter((o) => {
-    if (!o || o.locked) return false;
+    if (!o || o.locked || ghost(o)) return false;
     const ob = worldBounds(o);
     return contain ? boxContains(b, ob) : boxesIntersect(b, ob);
   });
@@ -83,7 +96,7 @@ export function inBox(store, box, contain = false) {
 export function inLasso(store, poly) {
   if (poly.length < 3) return [];
   return store.objects.filter((o) => {
-    if (!o || o.locked) return false;
+    if (!o || o.locked || ghost(o)) return false;
     if (o.type === 'stroke') {
       let inside = 0;
       const step = Math.max(1, Math.floor(o.points.length / 12));
@@ -99,11 +112,33 @@ export function inLasso(store, poly) {
   });
 }
 
+/**
+ * The answer cover a tap at `p` would land on, or null.
+ *
+ * Ink is looked straight through: a teacher who circled the cover, or wrote
+ * "Q1" on it, still expects a tap there to lift it. Anything else sitting on
+ * top - a note, a picture - is what the tap is really on, so it wins.
+ */
+export function curtainAt(store, p, tol = 6) {
+  const order = store.doc.order;
+  for (let i = order.length - 1; i >= 0; i--) {
+    const o = store.doc.objects[order[i]];
+    if (!o || o.type === 'stroke' || ghost(o)) continue;
+    if (!hitObject(o, p, tol)) continue;
+    return o.type === 'curtain' ? o : null;
+  }
+  return null;
+}
+
 /** Strokes crossed by an eraser segment. */
 export function strokesAlong(store, a, b, radius) {
   const hits = [];
   const box = normalizeBox({ x: Math.min(a.x, b.x) - radius, y: Math.min(a.y, b.y) - radius, w: Math.abs(a.x - b.x) + radius * 2, h: Math.abs(a.y - b.y) + radius * 2 });
-  for (const o of store.objects) {
+  // In place, not through the `objects` getter: that copies the whole document
+  // into a fresh array, and this runs on every single pointer move of a scrub.
+  const objs = store.doc.objects;
+  for (const id of store.doc.order) {
+    const o = objs[id];
     if (!o || o.locked) continue;
     const ob = worldBounds(o);
     if (!boxesIntersect(box, ob)) continue;

@@ -3,6 +3,7 @@
 
 import { createWebAdapter, emitOpenFile } from './web-adapter.js';
 import { registerSessionFile } from './web-files.js';
+import { createAndroidAdapter } from './android-adapter.js';
 import * as cloudStorage from '../cloud/cloud-storage.js';
 
 export function initPlatform() {
@@ -14,6 +15,12 @@ export function initPlatform() {
     // assets keep going to disk exactly as before; the cloud layer wraps that
     // so the desktop app takes part in sync on the same terms as the PWA.
     attachCloudToBridge();
+    return;
+  }
+
+  // Android's origin-scoped message object exists before the first script.
+  if (window.GazBoardNative && typeof window.GazBoardNative.postMessage === 'function') {
+    window.board = createAndroidAdapter();
     return;
   }
 

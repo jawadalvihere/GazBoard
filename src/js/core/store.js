@@ -9,10 +9,11 @@
 
 import { uid, unionBox } from './util.js';
 import { pagesFrom, pageRects } from './pages.js';
+import { t } from '../i18n.js';
 
 export const CLIENT_ID = uid('c');
 
-export function emptyDoc(name = 'Untitled board') {
+export function emptyDoc(name = t('Untitled board')) {
   return {
     id: uid('b'), name, schema: 2,
     created: Date.now(), modified: Date.now(),
@@ -286,6 +287,29 @@ export class Store {
     return snap;
   }
 
+  /**
+   * Put everything back the way the snapshot found it, and record nothing.
+   *
+   * The counterpart to commitSnapshot: that one keeps the change and files it
+   * as a single undo entry, this one throws the change away. Used when a drag
+   * is abandoned mid-flight, where the objects have already been moved on
+   * screen but nothing should be remembered - not the move, and not an undo
+   * step for a move that never happened.
+   */
+  restoreSnapshot(snap) {
+    if (!snap || !snap.size) return false;
+    let touched = false;
+    for (const [id, before] of snap) {
+      const now = this.get(id);
+      if (!now) continue;
+      for (const k of Object.keys(now)) if (!(k in before)) delete now[k];
+      Object.assign(now, structuredCloneSafe(before));
+      touched = true;
+    }
+    if (touched) this.rev++;
+    return touched;
+  }
+
   commitSnapshot(label, snap) {
     const ops = [];
     for (const [id, before] of snap) {
@@ -330,7 +354,7 @@ export class Store {
   }
 
   load(data) {
-    const d = emptyDoc(data.name || 'Untitled board');
+    const d = emptyDoc(data.name || t('Untitled board'));
     d.id = data.id || d.id;
     d.created = data.created || Date.now();
     d.modified = data.modified || Date.now();
@@ -388,6 +412,34 @@ export function centerOf(o) { const b = boundsOf(o); return { x: b.x + b.w / 2, 
  * and the notes travel with it. `attachedTo` records that, and every transform
  * expands its selection through here so the two never come apart.
  */
+/**
+ * Everything that shares a group with the given ids.
+ *
+ * A group is not a container object. It is a name that several objects agree
+ * to share, which is why grouping costs nothing at draw time, survives a save
+ * without a new file format, and cannot end up holding a member that was
+ * deleted out from under it. Selecting is where it becomes real: touch one
+ * member and the whole group comes along, and every tool that already works
+ * on a selection - move, resize, delete, order, export - then works on the
+ * group without knowing groups exist.
+ */
+export function withGroups(store, ids, exceptGroup = null) {
+  const groups = new Set();
+  for (const id of ids) {
+    const o = store.get(id);
+    if (o?.groupId && o.groupId !== exceptGroup) groups.add(o.groupId);
+  }
+  if (!groups.size) return [...new Set(ids)];
+  const set = new Set(ids);
+  for (const o of store.objects) if (o?.groupId && groups.has(o.groupId)) set.add(o.id);
+  return [...set];
+}
+
+/** The ids in one group, in board order. */
+export function groupMembers(store, gid) {
+  return store.objects.filter((o) => o?.groupId === gid).map((o) => o.id);
+}
+
 export function withAttached(store, ids) {
   const set = new Set(ids);
   for (const o of store.objects) if (o && o.attachedTo && set.has(o.attachedTo)) set.add(o.id);

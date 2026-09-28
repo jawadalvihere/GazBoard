@@ -1,12 +1,14 @@
+import { t } from '../i18n.js';
+
 export const PEN_COLORS = [
   '#201f1e', '#e81123', '#ff8c00', '#fff100', '#107c10', '#0078d4', '#8764b8', '#e3008c',
   '#00b7c3', '#8e562e', '#605e5c', '#ffffff'
 ];
 
 export const PEN_EFFECTS = [
-  { id: 'none', label: 'Solid' },
-  { id: 'rainbow', label: 'Rainbow' },
-  { id: 'galaxy', label: 'Galaxy' }
+  { id: 'none', label: t('Solid') },
+  { id: 'rainbow', label: t('Rainbow') },
+  { id: 'galaxy', label: t('Galaxy') }
 ];
 
 export const HIGHLIGHTER_COLORS = ['#fff100', '#b0ff57', '#00e5ff', '#ff8ad8', '#ffa64d', '#c9a0ff'];
@@ -20,12 +22,12 @@ export const SHAPE_FILLS = ['none', '#ffffff', '#fde68a', '#bbf7d0', '#bfdbfe', 
 
 export const BOARD_COLORS = ['#ffffff', '#faf9f8', '#fdf6e3', '#eef6ff', '#f2fbf3', '#fdf2f8', '#f5f3ff', '#2b2b2b'];
 export const PATTERNS = [
-  { id: 'none', label: 'Plain' },
-  { id: 'grid', label: 'Grid' },
-  { id: 'dots', label: 'Dots' },
-  { id: 'lines', label: 'Lines' },
-  { id: 'columns', label: 'Columns' },
-  { id: 'graph', label: 'Graph' }
+  { id: 'none', label: t('Plain') },
+  { id: 'grid', label: t('Grid') },
+  { id: 'dots', label: t('Dots') },
+  { id: 'lines', label: t('Lines') },
+  { id: 'columns', label: t('Columns') },
+  { id: 'graph', label: t('Graph') }
 ];
 
 export const SHAPES = [
@@ -35,21 +37,80 @@ export const SHAPES = [
 ];
 
 export const SHAPE_LABELS = {
-  rect: 'Rectangle', roundRect: 'Rounded rectangle', ellipse: 'Ellipse', circle: 'Circle',
-  triangle: 'Triangle', rightTriangle: 'Right triangle', diamond: 'Diamond', pentagon: 'Pentagon',
-  hexagon: 'Hexagon', octagon: 'Octagon', star: 'Star', cloud: 'Cloud',
-  line: 'Line', arrow: 'Arrow', doubleArrow: 'Double arrow'
+  rect: t('Rectangle'), roundRect: t('Rounded rectangle'), ellipse: t('Ellipse'), circle: t('Circle'),
+  triangle: t('Triangle'), rightTriangle: t('Right triangle'), diamond: t('Diamond'), pentagon: t('Pentagon'),
+  hexagon: t('Hexagon'), octagon: t('Octagon'), star: t('Star'), cloud: t('Cloud'),
+  line: t('Line'), arrow: t('Arrow'), doubleArrow: t('Double arrow')
 };
 
 /* The pens that sit in the toolbar, in order, the way Whiteboard lays them out. */
 export const PENS = [
-  { id: 'black',   color: '#201f1e', effect: 'none',    label: 'Black pen' },
-  { id: 'red',     color: '#e81123', effect: 'none',    label: 'Red pen' },
-  { id: 'blue',    color: '#0078d4', effect: 'none',    label: 'Blue pen' },
-  { id: 'green',   color: '#107c10', effect: 'none',    label: 'Green pen' },
-  { id: 'rainbow', color: '#e81123', effect: 'rainbow', label: 'Rainbow pen' },
-  { id: 'galaxy',  color: '#8764b8', effect: 'galaxy',  label: 'Galaxy pen' }
+  { id: 'black',   color: '#201f1e', effect: 'none',    label: t('Black pen') },
+  { id: 'red',     color: '#e81123', effect: 'none',    label: t('Red pen') },
+  { id: 'blue',    color: '#0078d4', effect: 'none',    label: t('Blue pen') },
+  { id: 'green',   color: '#107c10', effect: 'none',    label: t('Green pen') },
+  { id: 'rainbow', color: '#e81123', effect: 'rainbow', label: t('Rainbow pen') },
+  { id: 'galaxy',  color: '#8764b8', effect: 'galaxy',  label: t('Galaxy pen') }
 ];
+
+/**
+ * The tray as it actually is, with any recolouring the user has done.
+ *
+ * PENS above is how the tray SHIPS. It is a constant, so reading a pen's colour
+ * from it always gave the factory answer - which is why recolouring the black
+ * pen, picking up another, and coming back to black handed you black again.
+ * The choice was never stored anywhere; only `penColor`, the one colour in the
+ * hand right now, was, and picking any pen overwrote it.
+ *
+ * What a person changed is kept in settings.pens, keyed by pen id, holding only
+ * the pens they actually touched. Everything else falls through to the shipped
+ * value, so the tray needs no migration and a settings file written by an older
+ * build opens with its pens exactly as they were.
+ */
+export function penList(settings) {
+  const mine = (settings && settings.pens) || {};
+  return PENS.map((p) => {
+    const m = mine[p.id];
+    if (!m) return p;
+    return { ...p, color: m.color || p.color, effect: m.effect || p.effect };
+  });
+}
+
+/** One pen from that tray, by id. */
+export function penById(settings, id) {
+  return penList(settings).find((p) => p.id === id) || null;
+}
+
+/**
+ * Remember what a pen was changed to.
+ *
+ * A pen recoloured to what it shipped as is forgotten rather than stored, so
+ * "put it back to black" leaves no trace behind to be carried forever.
+ */
+export function rememberPen(settings, id, { color, effect } = {}) {
+  const base = PENS.find((p) => p.id === id);
+  if (!base) return;
+  const next = { color: color || base.color, effect: effect || base.effect };
+  const mine = settings.pens || (settings.pens = {});
+  if (next.color === base.color && next.effect === base.effect) delete mine[id];
+  else mine[id] = next;
+}
+
+/**
+ * Which pen is in the hand.
+ *
+ * Settings written before pens could be recoloured have no `activePen`, so the
+ * colour in hand is matched against the tray instead - the way the toolbar used
+ * to decide this. That fallback is only for the first run after upgrading: the
+ * moment a pen is picked up, its id is recorded and the guessing stops. It is
+ * also why the id is what gets stored, not the colour: two pens set to the same
+ * colour would otherwise both light up, and neither would be wrong.
+ */
+export function heldPenId(settings) {
+  if (settings.activePen && PENS.some((p) => p.id === settings.activePen)) return settings.activePen;
+  const match = penList(settings).find((p) => p.color === settings.penColor && p.effect === settings.penEffect);
+  return match ? match.id : null;
+}
 
 /**
  * A pen drawn as a pen: barrel in its own colour, pale nib, so the row reads as
@@ -94,13 +155,27 @@ export function penIcon(color, effect, kind = 'pen') {
     <rect x="6.5" y="26" width="13" height="3" fill="rgba(255,255,255,.22)"/></svg>`;
 }
 
-/** Named text faces, including the comic/handwriting one. */
+/**
+ * Named text faces, in the order the picker shows them.
+ *
+ * Each leads with a face the app ships (see the @font-face rules at the top
+ * of app.css), so a board measures the same on every device that opens it.
+ * The names after it are what these faces used to be: they only matter where
+ * the bundled one cannot load, and in an SVG export opened in another program,
+ * which has no copy of ours and needs something close to fall back on.
+ *
+ * The id is what a board file stores, so it never changes; the label is only
+ * what the picker calls it. Kalam reads as someone's handwriting and Comic
+ * Neue as marker lettering, so that is what they are called - which left the
+ * ids the other way round, and they stay that way: renaming an id would change
+ * the lettering of every note already written in it.
+ */
 export const FONTS = [
-  { id: 'ui',     label: 'Sans',        stack: `'Segoe UI Variable','Segoe UI',-apple-system,Arial,sans-serif` },
-  { id: 'hand',   label: 'Handwriting', stack: `'Comic Sans MS','Segoe Print','Ink Free','Segoe Script','Bradley Hand','Chalkboard SE','Comic Neue',cursive` },
-  { id: 'marker', label: 'Marker',      stack: `'Ink Free','Segoe Marker','Comic Sans MS',cursive` },
-  { id: 'serif',  label: 'Serif',       stack: `Georgia,'Times New Roman',serif` },
-  { id: 'mono',   label: 'Mono',        stack: `'Cascadia Mono',Consolas,'Courier New',monospace` }
+  { id: 'ui',     label: t('Sans'),        family: 'GazBoard Open Sans',     stack: `'GazBoard Open Sans','GazBoard Noto Bengali','GazBoard Noto Arabic','GazBoard Noto Sans SC','GazBoard Noto Sans TC','Segoe UI Variable','Segoe UI',-apple-system,Arial,sans-serif` },
+  { id: 'marker', label: t('Handwriting'), family: 'GazBoard Kalam',         stack: `'GazBoard Kalam','GazBoard Noto Bengali','GazBoard Noto Arabic','GazBoard Noto Sans SC','GazBoard Noto Sans TC','Ink Free','Segoe Marker','Comic Sans MS',cursive` },
+  { id: 'hand',   label: t('Marker'),      family: 'GazBoard Comic Neue',    stack: `'GazBoard Comic Neue','GazBoard Noto Bengali','GazBoard Noto Arabic','GazBoard Noto Sans SC','GazBoard Noto Sans TC','Comic Sans MS','Segoe Print','Ink Free','Segoe Script','Bradley Hand','Chalkboard SE','Comic Neue',cursive` },
+  { id: 'serif',  label: t('Serif'),       family: 'GazBoard Gelasio',       stack: `'GazBoard Gelasio','GazBoard Noto Bengali','GazBoard Noto Arabic','GazBoard Noto Sans SC','GazBoard Noto Sans TC',Georgia,'Times New Roman',serif` },
+  { id: 'mono',   label: t('Mono'),        family: 'GazBoard Cascadia Mono', stack: `'GazBoard Cascadia Mono','GazBoard Noto Bengali','GazBoard Noto Arabic','GazBoard Noto Sans SC','GazBoard Noto Sans TC','Cascadia Mono',Consolas,'Courier New',monospace` }
 ];
 
 export function fontStack(id) {

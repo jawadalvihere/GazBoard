@@ -1,3 +1,180 @@
+/* Emoji artwork we ship ourselves, so a board looks the same on a laptop and a
+   phone and stays sharp however big a stamp gets. Outlines, not pictures - see
+   the note above EMOJI_FONT in render.js. Nothing is fetched from the network;
+   the file sits next to the app and works on a plane like the rest of it. */
+@font-face {
+  font-family: 'GazBoard Emoji';
+  src: url('../assets/fonts/gazboard-emoji.woff2') format('woff2');
+  font-display: block;
+}
+
+/*
+ * The five faces board text is written in, bundled rather than borrowed.
+ *
+ * Text on a board is laid out on whatever machine opens it: where each line
+ * breaks, how big a table cell's words come out. That used to be decided by
+ * whatever fonts the machine happened to have - Segoe UI on Windows, Roboto on
+ * an Android tablet - so one board wrapped one way on the desktop and another
+ * on the phone it was sent to. Every device now measures with the same files.
+ *
+ * Each family is named after the typeface itself, never after its label in
+ * the picker: labels are a matter of taste and have already been swapped once,
+ * and a family called "Handwriting" holding the face now labelled Marker is
+ * the kind of name that misleads everyone who reads it afterwards.
+ *
+ * All five are SIL Open Font License 1.1; the licence for each sits beside its
+ * files. Two subsets per weight: latin, and latin-ext for accented names. The
+ * weights are the two the board draws with - 400, and 600 for bold and table
+ * headers. Comic Neue and Kalam have no 600, and every device resolves that to
+ * their 700 the same way, which is the point.
+ *
+ * Nothing here is used by the app's own menus and panels: only board text.
+ */
+@font-face {
+  font-family: 'GazBoard Cascadia Mono';
+  src: url('../assets/fonts/board/cascadia-mono-latin-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: 'GazBoard Cascadia Mono';
+  src: url('../assets/fonts/board/cascadia-mono-latin-600-normal.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: 'GazBoard Cascadia Mono';
+  src: url('../assets/fonts/board/cascadia-mono-latin-ext-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: 'GazBoard Cascadia Mono';
+  src: url('../assets/fonts/board/cascadia-mono-latin-ext-600-normal.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: 'GazBoard Comic Neue';
+  src: url('../assets/fonts/board/comic-neue-latin-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: 'GazBoard Comic Neue';
+  src: url('../assets/fonts/board/comic-neue-latin-700-normal.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: 'GazBoard Gelasio';
+  src: url('../assets/fonts/board/gelasio-latin-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: 'GazBoard Gelasio';
+  src: url('../assets/fonts/board/gelasio-latin-600-normal.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: 'GazBoard Gelasio';
+  src: url('../assets/fonts/board/gelasio-latin-ext-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: 'GazBoard Gelasio';
+  src: url('../assets/fonts/board/gelasio-latin-ext-600-normal.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: 'GazBoard Kalam';
+  src: url('../assets/fonts/board/kalam-latin-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: 'GazBoard Kalam';
+  src: url('../assets/fonts/board/kalam-latin-700-normal.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: 'GazBoard Kalam';
+  src: url('../assets/fonts/board/kalam-latin-ext-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: 'GazBoard Kalam';
+  src: url('../assets/fonts/board/kalam-latin-ext-700-normal.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: 'GazBoard Open Sans';
+  src: url('../assets/fonts/board/open-sans-latin-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: 'GazBoard Open Sans';
+  src: url('../assets/fonts/board/open-sans-latin-600-normal.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD;
+}
+@font-face {
+  font-family: 'GazBoard Open Sans';
+  src: url('../assets/fonts/board/open-sans-latin-ext-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+@font-face {
+  font-family: 'GazBoard Open Sans';
+  src: url('../assets/fonts/board/open-sans-latin-ext-600-normal.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: block;
+  unicode-range: U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+0304,U+0308,U+0329,U+1D00-1DBF,U+1E00-1E9F,U+1EF2-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF;
+}
+
 :root {
   --bg: #f3f2f1;
   --surface: #ffffff;
@@ -16,9 +193,114 @@
   --r: 8px;
   --topbar-h: 48px;
   color-scheme: light;
+  /* The board itself is painted on a canvas, which no stylesheet can reach.
+     It is declared here anyway so both themes keep their colours in one place,
+     and the renderer reads it from here rather than carrying its own copy. */
+  --board: #ffffff;
+  --board-ink: #201f1e;
+}
+
+/*
+ * Dark.
+ *
+ * Every value below is a replacement for one above - no new names, no rules
+ * that only exist in the dark. That is what keeps the two themes from drifting:
+ * a panel built next month inherits dark for free because it is already using
+ * these variables, and there is no second stylesheet to remember to update.
+ *
+ * Written once and applied twice: once for someone who chose dark by hand, and
+ * once for someone whose machine is dark and who has not chosen either way. The
+ * media query is guarded against [data-theme=light] so choosing light by hand
+ * still wins over a dark desktop.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1b1a19;
+    --surface: #252423;
+    --surface-2: #2d2c2b;
+    --stroke: #3b3a39;
+    --stroke-2: #484644;
+    --text: #f3f2f1;
+    --text-2: #a19f9d;
+    --accent: #a6a8e0;
+    --accent-2: #4aa3e8;
+    --accent-soft: #33324a;
+    --danger: #f1707b;
+    --shadow-1: 0 1.6px 3.6px rgba(0,0,0,.34), 0 .3px .9px rgba(0,0,0,.28);
+    --shadow-2: 0 6.4px 14.4px rgba(0,0,0,.44), 0 1.2px 3.6px rgba(0,0,0,.32);
+    --shadow-3: 0 12.8px 28.8px rgba(0,0,0,.55), 0 2.4px 7.2px rgba(0,0,0,.36);
+    --board: #1f1e1d;
+    --board-ink: #f3f2f1;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #1b1a19;
+  --surface: #252423;
+  --surface-2: #2d2c2b;
+  --stroke: #3b3a39;
+  --stroke-2: #484644;
+  --text: #f3f2f1;
+  --text-2: #a19f9d;
+  --accent: #a6a8e0;
+  --accent-2: #4aa3e8;
+  --accent-soft: #33324a;
+  --danger: #f1707b;
+  --shadow-1: 0 1.6px 3.6px rgba(0,0,0,.34), 0 .3px .9px rgba(0,0,0,.28);
+  --shadow-2: 0 6.4px 14.4px rgba(0,0,0,.44), 0 1.2px 3.6px rgba(0,0,0,.32);
+  --shadow-3: 0 12.8px 28.8px rgba(0,0,0,.55), 0 2.4px 7.2px rgba(0,0,0,.36);
+  --board: #1f1e1d;
+  --board-ink: #f3f2f1;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
+/*
+ * Bangla and Arabic, for the app's own words as well as for text on a board.
+ *
+ * Not every machine has them: a Windows set up in English can show Bangla in
+ * whatever it has lying about, or in boxes. At about fifty kilobytes a weight
+ * they cost less than one screenshot, so they come with the app. Each covers
+ * only its own script (the unicode-range), so putting them at the front of a
+ * font list changes nothing for any other language.
+ *
+ * Chinese is not here on purpose. A Chinese face is five megabytes or more, so
+ * it is an optional download instead - see i18n.js.
+ */
+@font-face {
+  font-family: 'GazBoard Noto Bengali';
+  src: url('../assets/fonts/board/noto-sans-bengali-bengali-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0951-0952,U+0964-0965,U+0980-09FE,U+1CD0,U+1CD2,U+1CD5-1CD6,U+1CD8,U+1CE1,U+1CEA,U+1CED,U+1CF2,U+1CF5-1CF7,U+200C-200D,U+20B9,U+25CC,U+A8F1;
+}
+@font-face {
+  font-family: 'GazBoard Noto Bengali';
+  src: url('../assets/fonts/board/noto-sans-bengali-bengali-600-normal.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0951-0952,U+0964-0965,U+0980-09FE,U+1CD0,U+1CD2,U+1CD5-1CD6,U+1CD8,U+1CE1,U+1CEA,U+1CED,U+1CF2,U+1CF5-1CF7,U+200C-200D,U+20B9,U+25CC,U+A8F1;
+}
+@font-face {
+  font-family: 'GazBoard Noto Arabic';
+  src: url('../assets/fonts/board/noto-sans-arabic-arabic-400-normal.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0600-06FF,U+0750-077F,U+0870-088E,U+0890-0891,U+0897-08E1,U+08E3-08FF,U+200C-200E,U+2010-2011,U+204F,U+2E41,U+FB50-FDFF,U+FE70-FE74,U+FE76-FEFC;
+}
+@font-face {
+  font-family: 'GazBoard Noto Arabic';
+  src: url('../assets/fonts/board/noto-sans-arabic-arabic-600-normal.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+  unicode-range: U+0600-06FF,U+0750-077F,U+0870-088E,U+0890-0891,U+0897-08E1,U+08E3-08FF,U+200C-200E,U+2010-2011,U+204F,U+2E41,U+FB50-FDFF,U+FE70-FE74,U+FE76-FEFC;
+}
+
 html, body {
   height: 100%;
   height: 100dvh;
@@ -28,13 +310,15 @@ html, body {
   -webkit-text-size-adjust: 100%;
 }
 body {
-  font-family: 'Segoe UI Variable', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+  font-family: 'GazBoard Noto Bengali', 'GazBoard Noto Arabic', 'Segoe UI Variable', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
   font-size: 14px; color: var(--text); background: var(--bg);
   -webkit-font-smoothing: antialiased; user-select: none; cursor: default;
 }
 button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
 input, textarea { font: inherit; }
 
+/* The app frame owns web safe areas. Its children already sit inside them.
+   On Android the native frame handles these and forwards zeroed insets. */
 #app {
   display: flex;
   flex-direction: column;
@@ -49,7 +333,7 @@ input, textarea { font: inherit; }
 /* ---------------- top bar ---------------- */
 #topbar {
   height: var(--topbar-h); flex: 0 0 auto; display: flex; align-items: center; gap: 6px;
-  padding: 0 calc(10px + env(safe-area-inset-right, 0px)) 0 calc(10px + env(safe-area-inset-left, 0px));
+  padding: 0 10px;
   background: var(--surface); border-bottom: 1px solid var(--stroke);
   position: relative; z-index: 30;
   max-width: 100vw;
@@ -70,7 +354,7 @@ input, textarea { font: inherit; }
   flex-shrink: 1; text-overflow: ellipsis;
 }
 #boardTitle:hover { border-color: var(--stroke); }
-#boardTitle:focus { outline: none; border-color: var(--accent-2); background: #fff; }
+#boardTitle:focus { outline: none; border-color: var(--accent-2); background: var(--surface); }
 .spacer { flex: 1; min-width: 6px; }
 .badge { font-size: 11px; color: var(--text-2); background: var(--surface-2); border: 1px solid var(--stroke); padding: 3px 8px; border-radius: 20px; flex-shrink: 0; }
 
@@ -159,6 +443,23 @@ input, textarea { font: inherit; }
 .sw { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent; box-shadow: inset 0 0 0 1px rgba(0,0,0,.12); }
 .sw:hover { transform: scale(1.08); }
 .sw.active { border-color: var(--accent-2); box-shadow: inset 0 0 0 1px rgba(0,0,0,.12), 0 0 0 1px #fff; }
+/*
+ * The swatch whose colour follows the board.
+ *
+ * It paints light on a dark board and black on a white one, which makes it
+ * look like the plain white swatch beside it in dark mode. The ring is the
+ * difference: white is white everywhere, this one changes.
+ */
+.sw.sw-adaptive { box-shadow: inset 0 0 0 2px var(--surface), inset 0 0 0 3.5px var(--text-2); }
+
+/* the custom picker, dressed as one more swatch; the input itself is the
+   whole hit area so a thumb finds it as easily as any other colour */
+.sw.sw-custom { position: relative; overflow: hidden; }
+.sw.sw-custom input[type="color"] {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  opacity: 0; border: 0; padding: 0; cursor: pointer;
+}
+
 .sw.rainbow { background: conic-gradient(#f44,#fa0,#fd0,#4c4,#2af,#66f,#c4f,#f44); }
 .sw.galaxy { background: radial-gradient(circle at 30% 30%, #b18cff, #4a2f8f 55%, #1b1140); }
 
@@ -184,6 +485,34 @@ input, textarea { font: inherit; }
 .shape-btn { width: 40px; height: 40px; border-radius: 8px; display: grid; place-items: center; color: var(--text-2); }
 .shape-btn:hover { background: var(--surface-2); }
 .shape-btn.active { background: var(--accent-soft); color: var(--accent); }
+
+/* The emoji picker. The list is long on purpose, so it scrolls inside the
+   popover rather than growing a popover taller than the screen. */
+.emoji-pop { width: 312px; max-width: 78vw; }
+.emoji-search {
+  width: 100%; box-sizing: border-box; margin-bottom: 10px;
+  padding: 8px 10px; font: inherit; font-size: 13.5px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); color: var(--text);
+}
+.emoji-search:focus { outline: none; border-color: var(--accent); }
+.emoji-sections, .emoji-grid { max-height: 46vh; overflow-y: auto; overscroll-behavior: contain; }
+.emoji-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+.emoji-sections .emoji-grid { max-height: none; overflow: visible; }
+.emoji-sections h4 { margin: 10px 0 4px; }
+.emoji-sections h4:first-child { margin-top: 0; }
+/* The picker draws from the same font as the board, so the one you choose is
+   the one you get rather than a near-enough cousin from the system. */
+.emoji-cell {
+  font-family: 'GazBoard Emoji', 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', sans-serif;
+  aspect-ratio: 1; width: 100%; border: 0; border-radius: 8px; background: none;
+  font-size: 21px; line-height: 1; cursor: pointer; padding: 0;
+  display: grid; place-items: center;
+}
+.emoji-cell:hover { background: var(--surface-2); }
+.emoji-cell.active { background: var(--accent-soft); }
+.emoji-empty { padding: 14px 2px; color: var(--text-2); font-size: 13px; }
+@media (pointer: coarse) { .emoji-cell { font-size: 24px; } }
 
 .menu { min-width: 240px; padding: 6px; }
 .menu-item {
@@ -265,6 +594,7 @@ input, textarea { font: inherit; }
 #ctxbar button { width: 34px; height: 34px; border-radius: 6px; display: grid; place-items: center; color: var(--text-2); }
 #ctxbar button:hover { background: var(--surface-2); color: var(--text); }
 #ctxbar button[disabled] { opacity: .35; pointer-events: none; }
+#ctxbar button.on { background: var(--accent-soft); color: var(--accent); }
 #ctxbar .bar-sep { width: 1px; height: 20px; margin: 0 3px; background: var(--stroke); flex: none; }
 
 /* ---------------- side panel ---------------- */
@@ -326,10 +656,28 @@ input, textarea { font: inherit; }
 }
 
 #editLayer { position: absolute; inset: 0; pointer-events: none; z-index: 15; }
+/*
+ * The box you type in.
+ *
+ * It used to announce itself: a two-pixel accent border, rounded corners, a
+ * drop shadow, and an opaque white fill. Nothing you have ever typed into looks
+ * like that. Worse, the fill was a lie - it hid the note colour, the shape, the
+ * board underneath - so the thing you were looking at while typing was not the
+ * thing you got when you stopped, and the text jumped two pixels on commit
+ * besides, because a border sits between the box and its contents.
+ *
+ * A text box in Word, PowerPoint or Keynote is a thin dashed frame around text
+ * that is already sitting exactly where it will end up. So: no fill, no border,
+ * no shadow. The frame is an OUTLINE, which is painted outside the box and
+ * cannot shift a single character, held a few pixels clear of the text so it
+ * frames rather than crowds.
+ */
 #editLayer textarea {
-  position: absolute; pointer-events: auto; resize: none; border: 2px solid var(--accent-2);
-  border-radius: 4px; padding: 0; margin: 0; background: rgba(255,255,255,.96); color: var(--text);
-  overflow: hidden; outline: none; box-shadow: var(--shadow-2); user-select: text;
+  position: absolute; pointer-events: auto; resize: none;
+  border: 0; padding: 0; margin: 0; background: transparent; color: var(--text);
+  overflow: hidden; user-select: text;
+  outline: 1px dashed rgba(0,0,0,.45);
+  outline-offset: 4px;
 }
 
 /* ---------------- toast / progress ---------------- */
@@ -338,6 +686,25 @@ input, textarea { font: inherit; }
   background: #323130; color: #fff; padding: 9px 14px; border-radius: 6px; font-size: 13px;
   box-shadow: var(--shadow-2); display: flex; align-items: center; gap: 8px; animation: pop .18s ease;
 }
+/*
+ * A toast that carries something to do about itself. Tall enough to press with
+ * a thumb, because the first place this appears is a phone changing a board to
+ * A4 and finding work off the paper.
+ */
+.toast-action {
+  margin-left: 4px; border: 0; border-radius: 5px; cursor: pointer;
+  /* on a narrow phone the message wraps to three lines; without this the
+     button grows to match it and looks like a slab rather than a button */
+  align-self: center; flex: none; white-space: nowrap;
+  /* The toast layer is click-through so passing notes never block the board.
+     This button is the exception: it exists to be pressed. */
+  pointer-events: auto;
+  background: rgba(255,255,255,.18); color: #fff;
+  font: inherit; font-weight: 600; padding: 6px 11px; min-height: 32px;
+}
+.toast-action:hover { background: rgba(255,255,255,.3); }
+.toast-action:active { background: rgba(255,255,255,.4); }
+
 @keyframes pop { from { opacity: 0; transform: translateY(6px); } }
 
 #overlay { position: absolute; inset: 0; z-index: 60; background: rgba(0,0,0,.28); display: none; align-items: center; justify-content: center; }
@@ -352,7 +719,7 @@ input, textarea { font: inherit; }
 .btn:hover { background: var(--surface-2); }
 .btn.primary { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
 .btn.primary:hover { background: #106ebe; }
-.btn.danger { color: var(--danger); border-color: #f1bcbd; }
+.btn.danger { color: var(--danger); border-color: var(--stroke-2); }
 
 kbd {
   font: 11.5px/1.6 'Segoe UI', system-ui, sans-serif; background: var(--surface-2);
@@ -446,8 +813,8 @@ kbd {
   #toolbar::-webkit-scrollbar-thumb { background: var(--stroke); border-radius: 3px; }
   .tool { width: 36px; height: 36px; }
   .pen { flex: 0 0 auto; }
-  #zoombar { right: calc(8px + env(safe-area-inset-right, 0px)); bottom: calc(98px + env(safe-area-inset-bottom, 0px)); }
-  #pagebar { right: calc(8px + env(safe-area-inset-right, 0px)); bottom: calc(146px + env(safe-area-inset-bottom, 0px)); }
+  #zoombar { right: 8px; bottom: 98px; }
+  #pagebar { right: 8px; bottom: 146px; }
   .panel { width: min(340px, 92vw); }
 }
 
@@ -461,19 +828,12 @@ kbd {
 
 /* A snapped window is often short as well as narrow. */
 @media (max-height: 620px) {
-  #toolbar { bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
+  #toolbar { bottom: 8px; }
 }
 
 @media (max-width: 860px) and (max-height: 620px) {
-  #zoombar { bottom: calc(92px + env(safe-area-inset-bottom, 0px)); }
-  #pagebar { bottom: calc(140px + env(safe-area-inset-bottom, 0px)); }
-}
-
-/* Very short and narrow: nothing stacks, so the readouts go to the top right
-   and leave the bottom entirely to the pens. */
-@media (max-width: 860px) and (max-height: 460px) {
-  #zoombar { top: calc(8px + env(safe-area-inset-top, 0px)); bottom: auto; }
-  #pagebar { top: calc(52px + env(safe-area-inset-top, 0px)); bottom: auto; }
+  #zoombar { bottom: 92px; }
+  #pagebar { bottom: 140px; }
 }
 
 /* Mobile touch target sizing and comfortable pointer rules */
@@ -482,6 +842,12 @@ kbd {
   .tool { width: 44px; height: 44px; }
   .pen { width: 36px; height: 50px; }
   #zoombar button, #pagebar button { width: 36px; height: 36px; }
+
+  /* Typing into a note or a text box: the keyboard has the bottom half of the
+     screen and the toolbar was landing on the box itself. Pens are no use
+     mid-word, so they stand down until the words are finished. Touch only -
+     on a desktop the toolbar is nowhere near what you are typing. */
+  body.typing #toolbar, body.typing #pagebar { display: none; }
   .icon-btn { width: 38px; height: 38px; }
   .btn { min-height: 38px; }
   .menu-item { padding: 10px 12px; }
@@ -499,14 +865,77 @@ kbd {
       -webkit-overflow-scrolling: touch;
       padding-top: 12px;
     }
-    #zoombar { right: calc(8px + env(safe-area-inset-right, 0px)); bottom: calc(98px + env(safe-area-inset-bottom, 0px)); }
-    #pagebar { right: calc(8px + env(safe-area-inset-right, 0px)); bottom: calc(148px + env(safe-area-inset-bottom, 0px)); }
+    /*
+     * `top: auto` is not decoration - it is the whole fix for a bug that only
+     * ever appeared on a phone.
+     *
+     * The short-screen rule below sends these to the TOP of the board, setting
+     * top and clearing bottom. This block then set bottom again and said
+     * nothing about top, so on a touch device where both apply, the element
+     * ended up with a top AND a bottom - and an absolutely positioned box given
+     * both does not move, it STRETCHES between them. With the keyboard open on
+     * a phone the zoom readout became a 276-pixel-tall white column down the
+     * side of the screen. On a desktop it never happened, because none of this
+     * block applies without a coarse pointer.
+     *
+     * Rule for anything positioned here: whichever edge you set, clear the
+     * other one.
+     */
+    #zoombar { right: 8px; top: auto; bottom: 98px; }
+    #pagebar { right: 8px; top: auto; bottom: 148px; }
   }
+}
+
+/* Very short and narrow: nothing stacks, so the readouts go to the top right
+   and leave the bottom entirely to the pens.
+
+   This sits AFTER the coarse-pointer block on purpose. Both can apply at once -
+   a phone in landscape, or any phone with the keyboard open - and the later one
+   wins. Put this first and the touch rules quietly moved the readouts back to
+   the bottom, which is exactly when there is no room for them. */
+@media (pointer: fine) and (max-width: 860px) and (max-height: 460px) {
+  #zoombar { top: 8px; bottom: auto; }
+  #pagebar { top: 52px; bottom: auto; }
+}
+
+/* Touch readouts stay just above the pens in both orientations. */
+@media (pointer: coarse) {
+  #zoombar { top: auto; bottom: 98px; right: 8px; }
+  #pagebar { top: auto; bottom: 148px; right: 8px; }
+  #ctxbar { max-width: calc(100% - 16px); overflow-x: auto; }
+  #ctxbar button { flex-shrink: 0; }
+}
+
+/*
+ * ...unless the keyboard has taken the bottom.
+ *
+ * The rule above pins the readouts above the pen tray, which is right until
+ * there is no bottom left to sit above: with the on-screen keyboard open the
+ * viewport is half as tall and 98px from the bottom is underneath it. The
+ * short-screen rule that moves them to the top used to cover this and was
+ * narrowed to `pointer: fine`, which excludes every phone - the one kind of
+ * screen that HAS an on-screen keyboard.
+ *
+ * This has to come after the block above, and it has to set `bottom: auto`.
+ * A box given both a top and a bottom does not move, it stretches, and that is
+ * how the zoom readout once became a 276-pixel white column down the side.
+ *
+ * Portrait only. A short screen is EITHER a phone with the keyboard open or a
+ * phone turned on its side, and only the first one has lost its bottom - a
+ * landscape phone has a perfectly good pen tray down there with room above it,
+ * and moving the readouts to the top there just puts them somewhere nobody is
+ * looking. A keyboard-shrunk portrait viewport is still taller than it is wide
+ * (412x430 on the phone this was measured on), so the two cases separate
+ * cleanly on orientation.
+ */
+@media (pointer: coarse) and (max-height: 460px) and (orientation: portrait) {
+  #zoombar { top: 8px; bottom: auto; }
+  #pagebar { top: 52px; bottom: auto; }
 }
 
 /* Smartphone portrait viewports (under 480px width) */
 @media (max-width: 480px) {
-  #topbar { gap: 2px; padding: 0 calc(6px + env(safe-area-inset-right, 0px)) 0 calc(6px + env(safe-area-inset-left, 0px)); }
+  #topbar { gap: 2px; padding: 0 6px; }
   #boardTitle { min-width: 80px; max-width: 140px; font-size: 13.5px; padding: 4px 6px; }
   .badge { display: none; }
   .tb-btn { padding: 0 5px; }
@@ -538,8 +967,15 @@ kbd {
   flex-shrink: 0;
 }
 .sync-pill:hover { background: var(--surface); border-color: var(--stroke-2); }
-.sync-pill[data-sync="live"]       { color: #0b6a0b; }
-.sync-pill[data-sync="connecting"] { color: #8a6d00; }
+/* Green and amber need lighter shades on the dark theme, or "live" all but
+   disappears into the top bar. Guarded the same way as the theme itself. */
+:root { --sync-live: #0b6a0b; --sync-wait: #8a6d00; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --sync-live: #6ccb5f; --sync-wait: #e3b341; }
+}
+:root[data-theme="dark"] { --sync-live: #6ccb5f; --sync-wait: #e3b341; }
+.sync-pill[data-sync="live"]       { color: var(--sync-live); }
+.sync-pill[data-sync="connecting"] { color: var(--sync-wait); }
 .sync-pill[data-sync="error"]      { color: var(--danger); }
 .sync-pill[data-sync="offline"],
 .sync-pill[data-sync="off"]        { color: var(--text-2); }
@@ -612,7 +1048,7 @@ kbd {
 /* A dot that breathes, so "live" is visible without a word for it. */
 .room-live {
   display: inline-block; width: 7px; height: 7px; border-radius: 50%;
-  background: #0b6a0b; margin-right: 5px;
+  background: var(--sync-live); margin-right: 5px;
   animation: room-pulse 1.6s ease-in-out infinite;
 }
 @keyframes room-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
@@ -661,3 +1097,353 @@ kbd {
   background: var(--stroke); flex-shrink: 0;
 }
 .room-tab.active .room-count { background: var(--surface-2); }
+/* ------------------------------------------------------------------ *
+ *  A board arriving
+ *
+ *  Someone may be writing on the board when a colleague hits Send, so this
+ *  lives IN the top bar rather than over the canvas: it cannot cover ink,
+ *  and showing or hiding it never moves the drawing surface. The ring is a
+ *  conic gradient, so filling it is one style write the compositor handles -
+ *  no layout, no repaint of the board behind it.
+ * ------------------------------------------------------------------ */
+/*
+ * Amber, not the app's own blue.
+ *
+ * Every other accent in GazBoard is blue, so a blue badge is one more blue
+ * thing on a blue toolbar - the eye slides straight off it. Amber appears
+ * nowhere else in the app, which is the entire reason it works: something has
+ * changed, and it is the only warm thing on the screen.
+ *
+ * Fixed colours rather than theme variables, again on purpose. This has one
+ * job in both light and dark, and it should look the same doing it.
+ */
+#rxBadge {
+  --rx-amber: #d97706;
+  --rx-amber-strong: #ea580c;
+  --rx-green: #15803d;
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px 4px 5px;
+  margin-right: 4px;
+  border-radius: 999px;
+  background: rgba(217, 119, 6, .14);
+  border: 1.5px solid var(--rx-amber);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--rx-amber);
+  max-width: 280px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+#rxBadge.show { display: flex; }
+
+#rxBadge .rx-ring {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border-radius: 50%;
+  background: conic-gradient(var(--rx-amber) 0deg, rgba(217, 119, 6, .22) 0deg);
+  /* the hole in the middle, so it reads as a ring rather than a pie */
+  -webkit-mask: radial-gradient(circle, transparent 5px, #000 5.5px);
+  mask: radial-gradient(circle, transparent 5px, #000 5.5px);
+}
+
+/* Landed. Green for a few seconds, because "it is here" and "it is coming"
+   should not look the same at a glance from the back of a room. */
+#rxBadge.done {
+  background: rgba(21, 128, 61, .14);
+  border-color: var(--rx-green);
+  color: var(--rx-green);
+}
+#rxBadge.done .rx-ring {
+  background: var(--rx-green);
+  -webkit-mask: none;
+  mask: none;
+}
+
+#rxBadge .rx-label { overflow: hidden; text-overflow: ellipsis; }
+
+/* =================================================================
+ *  The compact phone bar.
+ *
+ *  Nine buttons, no scrolling, no wrapping. The whole point is that the pen
+ *  you want is where your thumb already is, so nothing here is allowed to push
+ *  the row wider than the screen: the buttons share what space there is and
+ *  shrink together rather than sliding out of reach.
+ * ================================================================= */
+#toolbar.phone {
+  left: 6px; right: 6px;
+  /* The wider-screen rules above set `width: max-content`, which lets the row
+     decide its own width and push past the edge of a handset. Both edges are
+     pinned here instead, so the screen decides and the buttons share it. */
+  width: auto;
+  box-sizing: border-box;
+  max-width: none;
+  transform: none;
+  margin: 0;
+  gap: 2px;
+  padding: 8px 6px 9px;
+  justify-content: space-evenly;
+  overflow: visible;                 /* a raised pen must not be clipped */
+  bottom: 10px;
+}
+#toolbar.phone .pen,
+#toolbar.phone .tool {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+#toolbar.phone .tool-sm { width: 38px; height: 38px; margin-bottom: 4px; }
+/* No keyboard on a phone, so no letters to advertise. */
+#toolbar.phone .kbd { display: none; }
+#toolbar.phone .sep { margin: 0 1px; }
+
+/* Narrow handsets: give the row the last few pixels rather than a scrollbar. */
+@media (max-width: 400px) {
+  #toolbar.phone { gap: 0; padding-left: 3px; padding-right: 3px; }
+  #toolbar.phone .tool-sm { width: 34px; height: 34px; }
+}
+
+/*
+ * On a phone it leaves the bar and becomes a strip of its own.
+ *
+ * It used to shrink to a 34px stub with the name hidden, on the grounds that
+ * the top bar had no room. What that produced was a half-filled circle sitting
+ * in a row of buttons, saying nothing: you could see something was happening
+ * and not what, or who from, or whether it concerned you. A progress ring with
+ * no subject is just movement in the corner of your eye while you are writing.
+ *
+ * So on a phone it lifts out of the bar and floats under the top edge, wide
+ * enough to carry the sender's name, and it is calm: no pulse, no solid
+ * orange, muted against the board. Loud enough to read at a glance, quiet
+ * enough to write underneath.
+ */
+@media (max-width: 760px) {
+  #rxBadge {
+    position: fixed;
+    left: 50%;
+    top: calc(env(safe-area-inset-top, 0px) + 8px);
+    transform: translateX(-50%);
+    z-index: 40;
+    max-width: min(86vw, 340px);
+    margin: 0;
+    padding: 6px 14px 6px 8px;
+    background: var(--surface);
+    border-color: rgba(217, 119, 6, .55);
+    box-shadow: 0 3px 14px rgba(0, 0, 0, .16);
+    font-size: 13px;
+  }
+  #rxBadge .rx-label { display: block; }
+  /* It announces itself by arriving, not by flashing. */
+  #rxBadge.alert {
+    background: var(--surface);
+    border-color: var(--rx-amber);
+    color: var(--rx-amber);
+    animation: rx-slide .28s ease-out 1;
+  }
+  #rxBadge.alert .rx-ring {
+    background: conic-gradient(var(--rx-amber) 0deg, rgba(217, 119, 6, .22) 0deg);
+  }
+  #rxBadge.done {
+    background: var(--surface);
+    border-color: var(--rx-green);
+  }
+}
+
+@keyframes rx-slide {
+  from { opacity: 0; transform: translate(-50%, -10px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/*
+ * The first couple of seconds of a board arriving.
+ *
+ * Only box-shadow, border-colour and the badge's own background move. None of
+ * those affect layout, so the toolbar does not shift and the canvas is never
+ * asked to repaint - the animation runs on the compositor while somebody
+ * carries on writing underneath it.
+ */
+/* The first two and a half seconds: filled in, not merely outlined. Somebody
+   looking at their own handwriting has to catch this out of the corner of an
+   eye, so it is solid colour and it moves. */
+#rxBadge.alert {
+  background: var(--rx-amber-strong);
+  border-color: var(--rx-amber-strong);
+  color: #fff;
+  animation: rx-pulse 1.1s ease-out 3;
+}
+#rxBadge.alert .rx-ring {
+  background: conic-gradient(#fff 0deg, rgba(255, 255, 255, .35) 0deg);
+}
+
+@keyframes rx-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(234, 88, 12, .6); }
+  70%  { box-shadow: 0 0 0 11px rgba(234, 88, 12, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(234, 88, 12, 0); }
+}
+
+/* Someone who has asked their system for less movement gets the colour change
+   and no pulse. The chime and the ring still do their job. */
+@media (prefers-reduced-motion: reduce) {
+  #rxBadge.alert { animation: none; }
+}
+
+/* =================================================================== *
+ *  Presenting
+ *
+ *  The board and nothing else. Every bar goes; the toolbar is only tucked
+ *  below the bottom edge, and comes back up when the pointer goes down
+ *  there (see present.js) or when the corner bar pins it.
+ *
+ *  `translate` rather than `transform`, because the narrow layouts already
+ *  set transform on the toolbar and the two would fight. The individual
+ *  property composes with whatever transform is in force.
+ * =================================================================== */
+body.presenting #topbar,
+body.presenting #pagebar,
+body.presenting #zoombar,
+body.presenting #hints { display: none !important; }
+#toolbar { transition: translate .2s ease, opacity .2s ease; }
+body.presenting #toolbar { translate: 0 calc(100% + 40px); opacity: 0; pointer-events: none; }
+body.presenting.show-tools #toolbar { translate: 0 0; opacity: 1; pointer-events: auto; }
+
+#presentbar {
+  position: absolute; right: 14px; bottom: 14px; z-index: 22;
+  display: flex; align-items: center; gap: 2px; padding: 4px;
+  background: var(--surface); border: 1px solid var(--stroke); border-radius: 10px; box-shadow: var(--shadow-1);
+  opacity: .42; transition: opacity .18s ease;
+}
+#presentbar[hidden] { display: none; }
+#presentbar:hover, #presentbar:focus-within { opacity: 1; }
+#presentbar button { width: 34px; height: 34px; border-radius: 6px; display: grid; place-items: center; color: var(--text-2); }
+#presentbar button[hidden] { display: none; }
+#presentbar button:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+#presentbar button:disabled { opacity: .35; cursor: default; }
+#presentbar button.on { background: var(--accent-soft); color: var(--accent); }
+#presentLabel { min-width: 52px; text-align: center; font-size: 12.5px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+#presentLabel[hidden] { display: none; }
+@media (pointer: coarse) {
+  /* no hover to wake it up, so it is never quite as faint */
+  #presentbar { opacity: .7; }
+  #presentbar button { width: 40px; height: 40px; }
+}
+
+/* ---------------- answer covers ---------------- */
+#ctxbar button.reveal-btn {
+  width: auto; padding: 0 12px 0 9px; gap: 6px; display: flex; align-items: center;
+  color: var(--accent); font-size: 13px; font-weight: 600;
+}
+
+/* =================================================================== *
+ *  The class timer
+ *
+ *  Top left: the hints live top right, and the two must never sit on top
+ *  of one another. Big enough to read from the back of a room - which is
+ *  the only reason to put a clock on the board rather than a wrist.
+ * =================================================================== */
+#classTimer {
+  position: absolute; top: 14px; left: 16px; z-index: 27;
+  transform-origin: 0 0;
+  display: flex; align-items: center; gap: 8px; padding: 6px 18px 6px 12px;
+  background: var(--surface); border: 1px solid var(--stroke); border-radius: 14px; box-shadow: var(--shadow-2);
+  color: var(--text); user-select: none; touch-action: none; cursor: grab;
+}
+#classTimer:active { cursor: grabbing; }
+#classTimer button, #classTimer input { cursor: pointer; }
+#classTimer input { cursor: text; }
+#classTimer .ct-title { display: flex; color: var(--text-2); align-self: flex-start; padding-top: 8px; }
+#classTimer .ct-pick { display: flex; flex-direction: column; gap: 6px; }
+#classTimer .ct-presets { display: flex; gap: 4px; }
+#classTimer .ct-preset {
+  height: 36px; padding: 0 12px; border-radius: 8px; font-size: 14px; font-weight: 600;
+  color: var(--text); background: var(--surface-2);
+}
+#classTimer .ct-preset:hover { background: var(--accent-soft); color: var(--accent); }
+#classTimer .ct-custom { display: flex; gap: 4px; }
+#classTimer .ct-input {
+  flex: 1; min-width: 0; height: 34px; padding: 0 10px; border-radius: 8px; font-size: 14px;
+  border: 1px solid var(--stroke); background: var(--surface); color: var(--text);
+}
+#classTimer .ct-input:focus { outline: none; border-color: var(--accent-2); }
+#classTimer .ct-input.ct-bad { border-color: #d13438; background: rgba(209, 52, 56, .08); }
+#classTimer .ct-go { height: 34px; padding: 0 14px; border-radius: 8px; font-size: 13.5px; font-weight: 600; color: #fff; background: var(--accent); }
+#classTimer .ct-now { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); }
+#classTimer .ct-now-digits { font-size: 20px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+#classTimer .ct-keep { margin-left: auto; height: 28px; padding: 0 10px; border-radius: 7px; font-size: 12.5px; font-weight: 600; color: var(--accent); background: var(--accent-soft); }
+#classTimer .ct-digits {
+  font-size: clamp(44px, 7vw, 96px); line-height: 1; font-weight: 700;
+  font-variant-numeric: tabular-nums; letter-spacing: -1px; color: var(--text);
+  padding: 2px 4px; border-radius: 8px; cursor: inherit;
+}
+#classTimer .ct-controls { display: flex; flex-direction: column; gap: 2px; }
+#classTimer.ct-running .ct-controls, #classTimer.ct-paused .ct-controls, #classTimer.ct-done .ct-controls {
+  display: grid; grid-template-columns: repeat(2, 30px);
+}
+#classTimer .ct-btn { width: 30px; height: 30px; border-radius: 6px; display: grid; place-items: center; color: var(--text-2); }
+#classTimer .ct-btn:hover { background: var(--surface-2); color: var(--text); }
+#classTimer.ct-paused .ct-digits { opacity: .55; }
+/* The corner to size it by: three short diagonal lines, the usual sign. */
+#classTimer .ct-resize {
+  position: absolute; right: 2px; bottom: 2px; width: 16px; height: 16px; cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 45%, var(--text-2) 45%, var(--text-2) 52%, transparent 52%,
+    transparent 64%, var(--text-2) 64%, var(--text-2) 71%, transparent 71%, transparent 83%, var(--text-2) 83%, var(--text-2) 90%, transparent 90%);
+  opacity: .5; border-radius: 0 0 12px 0;
+}
+#classTimer .ct-resize:hover { opacity: 1; }
+/* The last thirty seconds, and time's up: red, so the back row sees it
+   coming. At zero it also pulses for a few seconds - noticed, not an alarm. */
+#classTimer.ct-low .ct-digits, #classTimer.ct-low .ct-now-digits { color: #d13438; }
+#classTimer.ct-low { border-color: #d13438; }
+#classTimer.ct-done { border-color: #d13438; }
+#classTimer.ct-done .ct-digits { color: #d13438; animation: ctPulse 1s ease-in-out 6; }
+@keyframes ctPulse { 50% { opacity: .25; } }
+@media (max-width: 620px) {
+  #classTimer .ct-preset { padding: 0 8px; }
+}
+
+/* =================================================================== *
+ *  Right-to-left (Arabic)
+ *
+ *  The app's frame mirrors: bars that sit on the right move to the left,
+ *  the side panel slides in from the left, arrows that mean "next" point
+ *  the way the page is read. Flex rows mirror by themselves once the page
+ *  is dir="rtl"; these are the things placed by hand.
+ *
+ *  The BOARD does not mirror. Ink, shapes and text on it are where the
+ *  person put them, and a board made in one language must look the same
+ *  opened in another - so the canvas and the text editor stay left to right.
+ * =================================================================== */
+[dir="rtl"] #c, [dir="rtl"] #editLayer, [dir="rtl"] #inkNib { direction: ltr; }
+[dir="rtl"] .menu-item, [dir="rtl"] .board-row, [dir="rtl"] .tpl { text-align: right; }
+[dir="rtl"] .menu-item .k { margin-left: 0; margin-right: auto; }
+[dir="rtl"] #classTimer .ct-keep { margin-left: 0; margin-right: auto; }
+[dir="rtl"] #zoombar { right: auto; left: 16px; }
+[dir="rtl"] #pagebar { right: auto; left: 16px; }
+[dir="rtl"] #presentbar { right: auto; left: 14px; }
+[dir="rtl"] #hints { right: auto; left: 16px; align-items: flex-start; }
+[dir="rtl"] .panel {
+  right: auto; left: 0; border-left: 0; border-right: 1px solid var(--stroke);
+  transform: translateX(-100%);
+}
+[dir="rtl"] .panel.open { transform: none; }
+/* "previous" and "next" point the way an Arabic page turns */
+[dir="rtl"] #pagebar [data-page="prev"] svg,
+[dir="rtl"] #pagebar [data-page="next"] svg,
+[dir="rtl"] #presentbar [data-present="prev"] svg,
+[dir="rtl"] #presentbar [data-present="next"] svg { transform: scaleX(-1); }
+@media (max-width: 1340px) {
+  [dir="rtl"] #toolbar { left: 252px; right: 12px; }
+}
+@media (max-width: 860px) {
+  [dir="rtl"] #toolbar { left: 8px; right: 8px; }
+  [dir="rtl"] #zoombar, [dir="rtl"] #pagebar { left: 8px; }
+}
+@media (max-width: 760px) {
+  [dir="rtl"] .panel { border-right: none; }
+}
+
+/* the language list in Settings */
+.lang-select {
+  font: inherit; font-size: 13px; padding: 5px 8px; border-radius: 6px; max-width: 190px;
+  border: 1px solid var(--stroke); background: var(--surface); color: var(--text);
+}

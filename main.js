@@ -11,13 +11,82 @@ const crypto = require('node:crypto');
 const SRC = path.join(__dirname, 'src');
 const isDev = process.argv.includes('--dev');
 
+/*
+ * Keep drawing at full speed while a screen recorder is running.
+ *
+ * Windows tells Chromium when a window is covered up, so it can stop drawing
+ * one nobody is looking at and save the battery. Sound in principle; wrong in
+ * practice the moment Zoom, Teams or OBS puts a floating sharing bar on screen.
+ * Those bars are see-through windows that sit above everything, and they are
+ * routinely mistaken for something covering the board. The board is right in
+ * front of the person teaching, and the app has quietly throttled itself: ink
+ * lags the pen, and the drawn nib stutters where the system cursor does not.
+ *
+ * These two switches turn that guess off. The cost is a window genuinely buried
+ * behind others still drawing at full rate - a little more battery in a case
+ * that barely happens to a whiteboard, which is open because it is being used.
+ *
+ * Both must be set before the app is ready; Chromium reads them once at startup.
+ */
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+
 // The one place the app knows about the internet, and it only looks.
 const RELEASES_URL = 'https://github.com/fahim9778/GazBoard/releases';
 // Overridable so the suite can serve a known reply from localhost and test the
 // whole chain - fetch, parse, compare, decide - without depending on the
 // network or on what happens to be released today.
 const UPDATE_API = process.env.GAZBOARD_UPDATE_API
-  || 'https://api.github.com/repos/fahim9778/GazBoard/releases/latest';
+  || 'https://api.github.com/repos/fahim9778/GazBoard/releases?per_page=30';
+
+/*
+ * Read a desktop version out of a release tag, or answer null.
+ *
+ * One repository publishes two kinds of release: v2.6.6 for the desktop and
+ * android-2.6.6-v1 for the phone. GitHub's "latest release" is simply whichever
+ * was published most recently, so an Android build put out after a desktop one
+ * wears the Latest badge - and an updater that trusted it was handed the tag
+ * "android-2.6.6-v1", failed to read a version out of it, and told everyone
+ * they were current on a version that was two releases old.
+ *
+ * So the tags this build cares about are named here, and everything else is
+ * ignored rather than guessed at.
+ */
+function desktopRelease(tag) {
+  if (typeof tag !== 'string') return null;
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(tag.trim());
+  if (!m) return null;
+  return { nums: [+m[1], +m[2], +m[3]], pre: m[4] || null };
+}
+
+/** Positive when a is the later version. Mirrors src/js/core/version.js. */
+function compareReleases(a, b) {
+  for (let i = 0; i < 3; i++) if (a.nums[i] !== b.nums[i]) return a.nums[i] - b.nums[i];
+  if (a.pre && !b.pre) return -1;          // a release beats its own prerelease
+  if (!a.pre && b.pre) return 1;
+  return 0;
+}
+
+/*
+ * Pick the newest desktop release out of whatever GitHub sent.
+ *
+ * A list is walked and the highest version wins - not the most recently
+ * published, which is the mistake that started all this. A single release
+ * object is still accepted, because that is what the older endpoint returns
+ * and what the test suite serves.
+ */
+function newestRelease(payload) {
+  const list = Array.isArray(payload) ? payload : [payload];
+  let best = null, bestV = null;
+  for (const r of list) {
+    if (!r || r.draft) continue;
+    const v = desktopRelease(r.tag_name);
+    if (!v) continue;
+    if (!bestV || compareReleases(v, bestV) > 0) { best = r; bestV = v; }
+  }
+  return best;
+}
+module.exports.newestRelease = newestRelease;
 
 // Smoke runs use a throwaway profile so tests never see (or clobber) real boards.
 // GAZBOARD_USER_DATA points the whole profile somewhere else and is kept between
@@ -298,7 +367,20 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
-      spellcheck: true
+      spellcheck: true,
+      /*
+       * The preload script cannot see the flags this app was started with -
+       * process.argv over there belongs to the renderer, and Chromium fills it
+       * with its own switches. Anything the page side needs to know about how
+       * the app was launched has to be handed across deliberately, and this is
+       * the door for it. Today that is one flag: --smoke, which is how preload
+       * knows to hand the suite a way to put something on the machine's
+       * clipboard. A normal launch passes nothing and the page gets nothing.
+       */
+      additionalArguments: process.argv.includes('--smoke') ? ['--smoke'] : [],
+      // The renderer's half of the switches above: never slow the board's
+      // drawing down because something appears to be covering it.
+      backgroundThrottling: false
     }
   });
   Menu.setApplicationMenu(buildMenu());
@@ -339,61 +421,94 @@ function createWindow() {
 
 function send(channel, payload) { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload); }
 
+/*
+ * The menu bar in the app's language. The words come from the same language
+ * files the window uses (src/locales), keyed by the English, so there is one
+ * translation to keep and not two.
+ */
+let menuWords = {};
+function T(s) { return menuWords[s] || s; }
+
+// Registered once, at load: a window opened again on macOS must not add a
+// second listener every time.
+ipcMain.on('app:language', (_e, code) => {
+  // A language code and nothing else: it is joined into a path below
+  if (typeof code !== 'string' || !/^[A-Za-z]{2,3}(-[A-Za-z]{2,4})?$/.test(code)) return;
+  menuWords = {};
+  if (code !== 'en') {
+    try { menuWords = JSON.parse(fs.readFileSync(path.join(__dirname, 'src', 'locales', code + '.json'), 'utf8')); }
+    catch { menuWords = {}; }
+  }
+  Menu.setApplicationMenu(buildMenu());
+});
+
 function buildMenu() {
   const isMac = process.platform === 'darwin';
   const cmd = (id) => () => send('menu:command', id);
   const template = [
     ...(isMac ? [{ role: 'appMenu' }] : []),
     {
-      label: 'File',
+      label: T('File'),
       submenu: [
-        { label: 'New board', accelerator: 'CmdOrCtrl+N', click: cmd('board.new') },
-        { label: 'Open board…', accelerator: 'CmdOrCtrl+O', click: cmd('board.open') },
-        { label: 'Save a copy…', accelerator: 'CmdOrCtrl+S', click: cmd('board.save') },
+        { label: T('New board'), accelerator: 'CmdOrCtrl+N', click: cmd('board.new') },
+        { label: T('Open board…'), accelerator: 'CmdOrCtrl+O', click: cmd('board.open') },
+        { label: T('Save a copy…'), accelerator: 'CmdOrCtrl+S', click: cmd('board.save') },
         { type: 'separator' },
-        { label: 'Insert image…', click: cmd('insert.image') },
-        { label: 'Insert document (Word / PowerPoint / PDF)…', click: cmd('insert.document') },
+        { label: T('Insert image…'), click: cmd('insert.image') },
+        { label: T('Insert document (Word / PowerPoint / PDF)…'), click: cmd('insert.document') },
+        { label: T('Insert answer cover'), click: cmd('insert.curtain') },
         { type: 'separator' },
-        { label: 'Export as PNG…', click: cmd('export.png') },
-        { label: 'Export as PDF…', click: cmd('export.pdf') },
-        { label: 'Export as SVG…', click: cmd('export.svg') },
+        { label: T('Export as PNG…'), click: cmd('export.png') },
+        { label: T('Export as PDF…'), click: cmd('export.pdf') },
+        { label: T('Export as SVG…'), click: cmd('export.svg') },
         { type: 'separator' },
-        isMac ? { role: 'close' } : { role: 'quit' }
+        isMac ? { role: 'close', label: T('Close window') } : { role: 'quit', label: T('Quit') }
       ]
     },
     {
-      label: 'Edit',
+      label: T('Edit'),
       submenu: [
-        { label: 'Undo', accelerator: 'CmdOrCtrl+Z', click: cmd('edit.undo') },
-        { label: 'Redo', accelerator: 'CmdOrCtrl+Shift+Z', click: cmd('edit.redo') },
+        { label: T('Undo'), accelerator: 'CmdOrCtrl+Z', click: cmd('edit.undo') },
+        { label: T('Redo'), accelerator: 'CmdOrCtrl+Shift+Z', click: cmd('edit.redo') },
         { type: 'separator' },
-        { label: 'Cut', accelerator: 'CmdOrCtrl+X', click: cmd('edit.cut') },
-        { label: 'Copy', accelerator: 'CmdOrCtrl+C', click: cmd('edit.copy') },
-        { label: 'Paste', accelerator: 'CmdOrCtrl+V', click: cmd('edit.paste') },
-        { label: 'Duplicate', accelerator: 'CmdOrCtrl+D', click: cmd('edit.duplicate') },
-        { label: 'Delete', click: cmd('edit.delete') },
+        { label: T('Cut'), accelerator: 'CmdOrCtrl+X', click: cmd('edit.cut') },
+        { label: T('Copy'), accelerator: 'CmdOrCtrl+C', click: cmd('edit.copy') },
+        // registerAccelerator: false shows the shortcut in the menu without
+        // claiming the key. The page therefore sees Ctrl+V itself and raises
+        // one ordinary paste event, so there is a single path that decides
+        // what to paste rather than two racing to answer first.
+        { label: T('Paste'), accelerator: 'CmdOrCtrl+V', registerAccelerator: false, click: cmd('edit.paste') },
+        { label: T('Duplicate'), accelerator: 'CmdOrCtrl+D', click: cmd('edit.duplicate') },
+        { label: T('Delete'), click: cmd('edit.delete') },
         { type: 'separator' },
-        { label: 'Select all', accelerator: 'CmdOrCtrl+A', click: cmd('edit.selectAll') },
-        { label: 'Clear canvas', click: cmd('edit.clear') }
+        { label: T('Select all'), accelerator: 'CmdOrCtrl+A', click: cmd('edit.selectAll') },
+        { label: T('Clear canvas'), click: cmd('edit.clear') }
       ]
     },
     {
-      label: 'View',
+      label: T('View'),
       submenu: [
-        { label: 'Zoom in', accelerator: 'CmdOrCtrl+=', click: cmd('view.zoomIn') },
-        { label: 'Zoom out', accelerator: 'CmdOrCtrl+-', click: cmd('view.zoomOut') },
-        { label: 'Reset zoom', accelerator: 'CmdOrCtrl+0', click: cmd('view.zoomReset') },
-        { label: 'Fit to board', accelerator: 'CmdOrCtrl+Shift+F', click: cmd('view.fit') },
+        { label: T('Zoom in'), accelerator: 'CmdOrCtrl+=', click: cmd('view.zoomIn') },
+        { label: T('Zoom out'), accelerator: 'CmdOrCtrl+-', click: cmd('view.zoomOut') },
+        { label: T('Reset zoom'), accelerator: 'CmdOrCtrl+0', click: cmd('view.zoomReset') },
+        { label: T('Fit to board'), accelerator: 'CmdOrCtrl+Shift+F', click: cmd('view.fit') },
         { type: 'separator' },
-        { label: 'Format background…', click: cmd('view.background') },
-        { label: 'Toggle ruler', accelerator: 'CmdOrCtrl+R', click: cmd('view.ruler') },
+        { label: T('Format background…'), click: cmd('view.background') },
+        { label: T('Toggle ruler'), accelerator: 'CmdOrCtrl+R', click: cmd('view.ruler') },
         { type: 'separator' },
-        { label: 'Full screen', accelerator: process.platform === 'darwin' ? 'Ctrl+Cmd+F' : 'F11', role: 'togglefullscreen' },
-        { label: 'Maximise window', click: () => { if (mainWindow) mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } },
-        { role: 'toggleDevTools' }
+        // F5 is shown here but handled by the page, the same way Paste is: the
+        // page also has to hear it while presenting, and a menu that claimed
+        // the key would stop it getting there.
+        { label: T('Present'), accelerator: 'F5', registerAccelerator: false, click: cmd('view.present') },
+        { label: T('Class timer'), click: cmd('timer.open') },
+        { label: T('Cover answers again'), click: cmd('curtain.coverAll') },
+        { type: 'separator' },
+        { label: T('Full screen'), accelerator: process.platform === 'darwin' ? 'Ctrl+Cmd+F' : 'F11', role: 'togglefullscreen' },
+        { label: T('Maximise window'), click: () => { if (mainWindow) mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize(); } },
+        { role: 'toggleDevTools', label: T('Developer tools') }
       ]
     },
-    { label: 'Help', submenu: [ { label: 'Keyboard shortcuts', click: cmd('help.shortcuts') }, { label: 'About GazBoard', click: cmd('help.about') } ] }
+    { label: T('Help'), submenu: [ { label: T('Keyboard shortcuts'), click: cmd('help.shortcuts') }, { label: T('About GazBoard'), click: cmd('help.about') } ] }
   ];
   return Menu.buildFromTemplate(template);
 }
@@ -401,21 +516,18 @@ function buildMenu() {
 /* ------------------------------------------------------------------ *
  *  LibreOffice discovery (best-fidelity Office conversion path)
  * ------------------------------------------------------------------ */
-function sofficeCandidates() {
-  const p = process.platform;
-  if (p === 'darwin') return ['/Applications/LibreOffice.app/Contents/MacOS/soffice', '/opt/homebrew/bin/soffice', '/usr/local/bin/soffice'];
-  if (p === 'win32') return [
-    'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
-    'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe',
-    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'LibreOffice', 'program', 'soffice.exe')
-  ];
-  return ['/usr/bin/soffice', '/usr/local/bin/soffice', '/snap/bin/libreoffice', '/usr/bin/libreoffice'];
-}
+const { resolveSoffice } = require('./soffice.js');
+/*
+ * Probed once and remembered: the search touches the filesystem a few dozen
+ * times and the answer cannot change while the app is open. Installing
+ * LibreOffice under a running GazBoard therefore needs a restart before the
+ * app sees it, which is why About reports what was found.
+ */
 let _soffice; // undefined = not probed, null = absent
 function findSoffice() {
-  if (process.env.GAZBOARD_DISABLE_LIBREOFFICE === '1') return null;
   if (_soffice !== undefined) return _soffice;
-  _soffice = sofficeCandidates().find((c) => { try { return c && fs.existsSync(c); } catch { return false; } }) || null;
+  _soffice = resolveSoffice();
+  if (_soffice) console.log('[import] LibreOffice:', _soffice);
   return _soffice;
 }
 
@@ -579,6 +691,7 @@ function sync() {
   syncService = createSyncService({
     userDataDir: app.getPath('userData'),
     onPeers: (peers) => send('sync:peers', peers),
+    onReceiving: (info) => send('sync:receiving', info),
     // A board that has arrived is a question for the person, not a decision for
     // the main process. This hands it to the window and waits for an answer;
     // no window, no answer, and the transfer is declined.
@@ -602,7 +715,7 @@ function ipc() {
   ipcMain.handle('app:info', () => ({
     version: app.getVersion(), platform: process.platform,
     electron: process.versions.electron, chrome: process.versions.chrome,
-    libreoffice: !!findSoffice(), userData: app.getPath('userData'),
+    libreoffice: !!findSoffice(), sofficePath: findSoffice(), userData: app.getPath('userData'),
     // the suite drives the app headlessly; it must never be stopped by a
     // consent dialog, and it must never reach the network
     smoke: process.argv.includes('--smoke'),
@@ -631,6 +744,29 @@ function ipc() {
   });
 
   ipcMain.handle('shell:showItem', (_e, p) => { shell.showItemInFolder(p); });
+
+  /*
+   * Open the boards folder itself, with the boards in it.
+   *
+   * showItemInFolder was the wrong call here. It opens the folder CONTAINING
+   * what you name and highlights it, so asking for the boards folder opened
+   * its parent with the boards folder sitting there selected - one click short
+   * of what the button says, and confusing enough that people assumed their
+   * boards were missing.
+   *
+   * The path is built here rather than sent in from the window, so it is the
+   * same one the app actually saves to, joined the way this operating system
+   * joins paths - a renderer gluing on '/boards' was near enough on Windows
+   * and not something to keep relying on.
+   */
+  ipcMain.handle('shell:openBoards', async () => {
+    const dir = dataDir();
+    try { await fsp.mkdir(dir, { recursive: true }); } catch { /* it is there, or it cannot be */ }
+    const err = await shell.openPath(dir);
+    // openPath answers with an empty string on success and a reason on failure.
+    if (err) { shell.showItemInFolder(dir); return false; }
+    return true;
+  });
   ipcMain.handle('shell:openExternal', async (_e, url) => {
     // only ever our own releases page - never an arbitrary URL from the board
     if (typeof url !== 'string' || !url.startsWith(RELEASES_URL)) return false;
@@ -657,7 +793,7 @@ function ipc() {
         headers: { 'User-Agent': `GazBoard/${app.getVersion()}`, Accept: 'application/vnd.github+json' }
       });
       if (!res.ok) return { ok: false, error: `GitHub replied ${res.status}` };
-      const j = await res.json();
+      const j = newestRelease(await res.json());
       if (!j || typeof j.tag_name !== 'string') return { ok: false, error: 'Unexpected reply from GitHub' };
       return {
         ok: true,
@@ -814,6 +950,9 @@ function ipc() {
   });
   // Resolves to whether the other machine was actually told. Forgetting here
   // has happened either way by the time this returns.
+  ipcMain.handle('sync:stillPaired', async (_e, peer) => {
+    try { return await sync().stillPaired(peer); } catch { return null; }
+  });
   ipcMain.handle('sync:unpair', async (_e, deviceId) => {
     try { return { ok: true, told: await sync().unpair(deviceId) }; }
     catch (e) { return { ok: true, told: false, error: e.message }; }

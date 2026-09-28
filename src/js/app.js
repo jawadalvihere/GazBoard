@@ -1,39 +1,66 @@
 // GazBoard - application shell and command surface.
 
 import './platform/platform.js';
-import { Store, withAttached, worldBounds, boundsOf } from './core/store.js';
+import { t, translatePage, currentLanguage } from './i18n.js';
+import { loadInstalled, onFontsChanged, packFor, isInstalled, download as downloadFontPack, sizeLabel } from './fontpack.js';
+import { Store, withAttached, withGroups, groupMembers, worldBounds, boundsOf } from './core/store.js';
 import { scaleObject, translateObject } from './core/transform.js';
 import { Surface } from './core/surface.js';
 import { Interaction } from './core/tools.js';
-import { pick } from './core/hit.js';
+import { pick, ghost } from './core/hit.js';
 import { uid, debounce, clamp, unionBox } from './core/util.js';
 import { pageRects, stripBounds, pageIndexForBox, nearestPageIndex, offsetIntoRect, PAGE_GAP } from './core/pages.js';
 import { isNewer } from './core/version.js';
+import { emojiAspect, forgetEmojiMetrics, setDarkBoard } from './core/render.js';
 import { TextEditor } from './ui/textedit.js';
 import { initToolbar, syncToolbar } from './ui/toolbar.js';
+import { initPresentBar, syncPresentBar } from './ui/present.js';
+import { ClassTimer } from './ui/timer.js';
 import { createPanels } from './ui/panels.js';
 import { showContextMenu, updateSelectionBar } from './ui/contextmenu.js';
 import { closePopover, popoverOpen, h } from './ui/popover.js';
 import { icon } from './ui/icons.js';
-import { PENS } from './ui/palettes.js';
+import { PENS, penById, rememberPen, heldPenId, FONTS } from './ui/palettes.js';
 import { exportPng, exportSvg, exportPdf, capturePage, saveBoardFile, openBoardFile, exportable } from './export.js';
 import { boardThumb } from './ui/thumb.js';
 import { pageWorldSize } from './ui/pdfdialog.js';
 import {
   pickAndInsertDocument, pickAndInsertImage, insertDocument,
-  insertImagesFromPaths, insertImageFiles, dropOrigin, isImagePath, isDocPath
+  insertImagesFromPaths, insertImageFiles, clipboardFileName, dropOrigin, isImagePath, isDocPath
 } from './insert.js';
 import * as cloudSync from './cloud/sync.js';
 import * as room from './cloud/room.js';
 import { mountRoomUI, startRoom } from './cloud/room-ui.js';
 import { mountSyncUI } from './cloud/ui.js';
 
-const DEFAULT_SETTINGS = {
-  penColor: '#201f1e', penWidth: 4, penEffect: 'none',
+export const DEFAULT_SETTINGS = {
+  penColor: '#201f1e', penWidth: 4, penEffect: 'none', activePen: 'black',
+  // Whether the look of the canvas - paper size, colour, pattern - is carried
+  // to the NEXT new board. Boards already made are never touched by it.
+  // `canvasDefaults` itself is deliberately absent, for the same reason `pens`
+  // is: DEFAULT_SETTINGS is spread shallowly, so an object literal here would
+  // be shared by every settings copy and the first change would write into the
+  // defaults themselves, where Reset could never clear it.
+  // OFF by default, deliberately. Turning it on changes what "New board" means,
+  // and doing that to someone who once tried A4 months ago - handing them A4
+  // for the rest of time without being asked - is not a favour. The switch sits
+  // in the Canvas panel and adopts whatever is on screen the moment it is used.
+  rememberCanvas: false,
+  // 'system' follows the machine's own light/dark setting; 'light' and 'dark'
+  // override it. System is the default because a whiteboard that quietly
+  // matches the rest of the desktop is less surprising than one that picks.
+  theme: 'system',
+  // Deliberately absent: `pens`, the map of pens the user has recoloured.
+  // DEFAULT_SETTINGS is spread shallowly, so an object literal here would be
+  // THE SAME object in every settings copy - and the first recolouring would
+  // write into the defaults themselves, where Reset could never clear it.
+  // rememberPen() creates the map on first use; leaving it out is also what
+  // makes Reset to defaults put every pen back to the colour it shipped with.
   highlighterColor: '#fff100', highlighterWidth: 20,
   eraserSize: 30, eraserMode: 'partial',
   pdfPaper: 'a4', pdfOrientation: '', pdfMargin: 'narrow', pdfMode: 'fit', pdfQuality: 2,
   noteColor: '#ffd94a', noteSize: 200, noteFont: 'hand',
+  emojiChar: '\u2705', emojiSize: 96, emojiRecent: [],
   textColor: '#201f1e', textSize: 32, textFont: 'hand',
   shapeKind: 'rect', shapeStroke: '#201f1e', shapeFill: 'none', shapeLineWidth: 3, shapeDash: null,
   // A new board is a sheet rather than unbounded space. Two screens of
@@ -47,7 +74,19 @@ const DEFAULT_SETTINGS = {
   // does not, so a touchscreen starts locked and a laptop does not.
   lockView: null,
   inkToShape: false, pressure: true, wheelZoom: false, returnToSelect: true, autosave: true,
-  edgePan: true, importQuality: 2, lowLatencyInk: false, laserColor: '#ff2d2d', showToolKeys: true,
+  showGroupOutlines: true,
+  edgePan: true, importQuality: 2, lowLatencyInk: false, laserColor: '#ff2d2d',
+  /*
+   * The letters under the tool icons.
+   *
+   * They are there so a shortcut gets FOUND - nobody memorises a sheet
+   * mid-lesson, but they do notice a "P" under the pen. That reasoning needs a
+   * keyboard to be worth anything. On a phone the letters are decoration on a
+   * bar that has no room for decoration, so they start off; on a tablet with a
+   * keyboard attached, or any machine with a real pointer, they start on.
+   */
+  showToolKeys: !(typeof matchMedia === 'function'
+    && matchMedia('(pointer: coarse)').matches && matchMedia('(max-width: 760px)').matches),
   rightDragPans: true, hintsSeen: {},
   // null = never asked. Nothing reaches the network until this is true.
   updateCheck: null, lastUpdateCheck: 0, skippedVersion: null, updateAskedAt: 0,
@@ -58,6 +97,21 @@ const DEFAULT_SETTINGS = {
   // What you see while inking: 'nib' (drawn by us, so Windows cannot hide it
   // mid-stroke), 'arrow' or 'crosshair'. See inkPointerKind() in tools.js.
   inkPointer: 'nib',
+  // Whether that nib also follows a FINGER. Off: a fingertip already covers
+  // the spot, so the nib is hidden under the hand or sliding about on its own,
+  // and a phone has no hover for it to belong to. On is for a touchscreen PC
+  // whose owner wants it anyway. See showInkPointer() in tools.js.
+  nibOnTouch: false,
+  // A short two-note chime when a board starts arriving. On by default: the
+  // thing it prevents is being halfway through a sentence when an "accept
+  // this board?" dialog appears out of nowhere. See showReceiving().
+  arrivalSound: true,
+  // 'auto' | 'yes' | 'no' - see fingerInks(). Auto lets the hardware answer.
+  inkWithFinger: 'auto',
+  // Holding a stylus's side button while writing rubs out, the way it does in
+  // Samsung's own apps. A pen's flip-over tail always erases and is not
+  // affected by this. See effectiveTool() in tools.js.
+  penButtonErases: true,
   // Sharing boards over the local network. Off, and off for everyone who
   // upgrades: nothing binds a port, announces itself or listens for anything
   // until this is switched on by hand. See initSync().
@@ -91,7 +145,7 @@ function boardNameFromPath(p) {
  * numbered a second copy for thirty years.
  */
 function uniqueBoardName(base, list) {
-  const name = String(base || 'Untitled board').trim() || 'Untitled board';
+  const name = String(base || t('Untitled board')).trim() || t('Untitled board');
   const taken = new Set((list || []).map((b) => String(b && b.name || '')));
   if (!taken.has(name)) return name;
   for (let n = 2; n < 1000; n++) {
@@ -127,22 +181,55 @@ class App {
      */
     this.roomMode = !!room.tokenFromUrl();
 
+    // The words written into index.html itself, and the menu bar, in the
+    // chosen language - before anything is built on top of them.
+    translatePage();
+    window.board?.setLanguage?.(currentLanguage());
     this.store = new Store();
     this.settings = this.loadSettings();
+    // Before the Surface exists, so the very first frame is already the right
+    // colour rather than a white flash that corrects itself a moment later.
+    this.applyTheme();
     this.surface = new Surface(document.getElementById('c'), this.store, { lowLatency: !!this.settings.lowLatencyInk });
+    this.surface.showGroupOutlines = this.settings.showGroupOutlines !== false;
     this.tool = 'pen';
     this.clipboard = [];
+    this.clipStamp = null;
+    this.boardPoint = null;
     this.ruler = { visible: false, x: 0, y: 0, angle: 0, length: 900, thickness: 78, snap: true };
     this.textEditor = new TextEditor(this);
     this.panels = createPanels(this);
     this.interaction = new Interaction(this);
 
     initToolbar(this);
+    // Presenting and the class timer. Neither is part of the board: both
+    // belong to the lesson, so they live on the app and outlast a board switch.
+    this.presenting = false;
+    this.presentToolsPinned = false;
+    initPresentBar(this);
+    this.timer = new ClassTimer(document.getElementById('stage'), {
+      box: this.settings.timerBox,
+      onPlace: (box) => { this.settings.timerBox = box; this.saveSettings(); }
+    });
     this.wireGlobalEvents();
     this.initDismissal();
     this.wireStore();
     this.initSync();
     this.restoreLastBoard();
+    // Board text cannot wait the way emoji can: until its faces land, every
+    // line on the board is measured in a stand-in font and wraps wrongly.
+    this.loadBoardFonts();
+    // A Chinese font downloaded on an earlier day is switched back on, and
+    // the board repaints when one arrives or goes. See fontpack.js.
+    onFontsChanged(() => { this.surface?.repaintAll?.(); this.panels?.fontsChanged?.(); });
+    loadInstalled().finally(() => this.offerFontPack());
+    // Emoji artwork can wait. Nothing on screen at start-up is an emoji, so
+    // fetching and decoding half a megabyte of it while the board is still
+    // restoring, wiring up and painting its first frame is work in the way of
+    // work that matters. On a desktop the difference is invisible; on a slow
+    // two-core machine it is the difference between a board that is ready and
+    // one that is still busy.
+    this.whenIdle(() => this.loadEmojiFont());
     // after the board is up, never before: the first thing anyone sees should
     // be their work, not a question
     setTimeout(() => this.startUpdateFlow(), 2500);
@@ -191,7 +278,58 @@ class App {
   }
   saveSettings() {
     try { localStorage.setItem('gazboard.settings', JSON.stringify(this.settings)); } catch {}
+    this.applyTheme();
     this.syncUI();
+  }
+
+  /**
+   * Light or dark, and who decides.
+   *
+   * The choice lands in one place - a data-theme attribute on <html> - and the
+   * stylesheet does the rest. Keeping it to one attribute means nothing else in
+   * the app has to know a theme exists; a panel built tomorrow inherits it for
+   * free because it is using the same variables everything else does.
+   *
+   * 'system' sets no attribute at all, leaving the CSS media query to answer.
+   * That is deliberate: the machine can change its mind at sunset, and the page
+   * should follow without anyone reopening the app.
+   */
+  applyTheme() {
+    const want = this.settings.theme || 'system';
+    const root = document.documentElement;
+    if (want === 'light' || want === 'dark') root.dataset.theme = want;
+    else delete root.dataset.theme;
+    this.watchSystemTheme();
+    // the board is painted on a canvas, which no stylesheet can reach
+    setDarkBoard(this.darkMode);
+    this.surface?.repaintAll?.();
+    // the nib is a cursor, not a drawing - it has to be re-tinted by hand
+    this.interaction?.refreshInkCursor?.();
+    // and on a phone the status bar and navigation bar belong to Android, not
+    // to this stylesheet - a dark board in a light frame is only half a theme
+    try { window.board?.setTheme?.(want); } catch {}
+  }
+
+  /** Follow the machine's own setting while we are set to 'system'. */
+  watchSystemTheme() {
+    if (this._themeWatch) return;
+    if (typeof matchMedia !== 'function') return;
+    this._themeWatch = matchMedia('(prefers-color-scheme: dark)');
+    this._themeWatch.addEventListener('change', () => {
+      if ((this.settings.theme || 'system') !== 'system') return;
+      setDarkBoard(this.darkMode);
+      this.surface?.repaintAll?.();
+      this.interaction?.refreshInkCursor?.();
+      this.syncUI();
+    });
+  }
+
+  /** True when the board should be painted dark, whatever route got us there. */
+  get darkMode() {
+    const want = this.settings.theme || 'system';
+    if (want === 'dark') return true;
+    if (want === 'light') return false;
+    return typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches;
   }
 
   /* ---------------- board lifecycle ---------------- */
@@ -319,7 +457,7 @@ class App {
 
   markDirty() {
     const b = document.getElementById('savedBadge');
-    b.textContent = 'Saving…';
+    b.textContent = t('Saving…');
   }
 
   /**
@@ -356,7 +494,7 @@ class App {
     this._lastSaveAt = performance.now();
     try { localStorage.setItem('gazboard.lastBoard', this.store.doc.id); } catch {}
     const b = document.getElementById('savedBadge');
-    b.textContent = 'Saved';
+    b.textContent = t('Saved');
   }
 
   /**
@@ -461,8 +599,8 @@ class App {
     }
     if (missing) {
       this.toast(missing === 1
-        ? 'One picture could not be found - its place is kept on the board'
-        : missing + ' pictures could not be found - their places are kept on the board', 'help', 6000);
+        ? t('One picture could not be found - its place is kept on the board')
+        : t('{n} pictures could not be found - their places are kept on the board', { n: missing }), 'help', 6000);
     }
     return { ...data, objects };
   }
@@ -522,7 +660,7 @@ class App {
       if (this.boardOpenedExplicitly) return;   // a file arrived while we asked
       if (res && res.board) {
         await this.loadBoard(res.board, { silent: true, startup: true });
-        if (res.reason === 'newest') this.toast('Reopened your most recent board');
+        if (res.reason === 'newest') this.toast(t('Reopened your most recent board'));
         return;
       }
     } catch (e) { console.warn('resume failed, falling back:', e); }
@@ -576,19 +714,59 @@ class App {
    * appears in the Boards list immediately, instead of materialising later when
    * the first mark happens to be made.
    */
+  /**
+   * Carry the look of this canvas to the next new board.
+   *
+   * Only what the person actually changed is kept, and only the LOOK of it:
+   * paper size, colour, pattern. Nothing anyone has drawn travels, and no board
+   * that already exists is touched - reaching back to change boards made last
+   * week because of a choice made today would be the opposite of helpful.
+   */
+  rememberCanvas(patch) {
+    if (!this.settings.rememberCanvas) return;
+    const mine = this.settings.canvasDefaults || (this.settings.canvasDefaults = {});
+    Object.assign(mine, patch);
+    this.saveSettings();
+  }
+
+  /** Put the remembered look on a board that has just been made. */
+  applyCanvasDefaults() {
+    const want = this.settings.rememberCanvas ? this.settings.canvasDefaults : null;
+    if (!want) return;
+    const bg = {};
+    for (const k of ['color', 'pattern', 'patternColor']) if (want[k] != null) bg[k] = want[k];
+    if (Object.keys(bg).length) {
+      // straight onto the fresh document rather than through commit(): a board
+      // one second old should not open with something already on its undo stack
+      Object.assign(this.store.doc.background, bg);
+      this.store.rev++;
+    }
+    if (want.paper === 'infinite') {
+      // this fork starts new boards on a sheet (settings.defaultPaper), so a
+      // remembered infinite canvas has to take that sheet away again
+      this.store.doc.pages = [];
+      this.store.rev++;
+    } else if (want.paper) {
+      // async, and it commits - which is right here: the sheet is a real change
+      // to an empty board, and it is the last thing to happen to it
+      this.setPageSize(want.paper, want.orientation || 'portrait');
+    }
+  }
+
   newBoard(silent = false) {
     this.store.reset();
     this.applyDefaultPage();
     this.surface.selection.clear();
+    this.applyCanvasDefaults();
     // A sheet wants to be seen whole - that is the entire point of having one.
     if (this.pageCount) this.fitToPage(0);
     else this.openAtActualSize();
     document.getElementById('boardTitle').value = this.store.doc.name;
     this.syncUI();
     this.surface.invalidate();
-    if (!silent) this.toast('New board');
+    if (!silent) this.toast(t('New board'));
     this.unsavedNew = true;
-    document.getElementById('savedBadge').textContent = 'Saved';
+    document.getElementById('savedBadge').textContent = t('Saved');
     window.board.boards.setLast(this.store.doc.id);
     // kept so callers (and the suite) can wait for the board to be on disk
     this.pendingWrite = silent ? Promise.resolve() : this.persist({ force: true });
@@ -707,7 +885,7 @@ class App {
     if (wasOpen) {
       this.textEditor.cancel();
       this.newBoard(true);          // silent: nobody asked for this board
-      this.toast('Board deleted');
+      this.toast(t('Board deleted'));
     }
     return wasOpen;
   }
@@ -746,28 +924,25 @@ class App {
 
     // A board that never got past the placeholder name is named after its file.
     // Two rows reading "Untitled board" is how this went unnoticed for so long.
-    const base = data.name && data.name !== 'Untitled board'
+    const base = data.name && data.name !== 'Untitled board' && data.name !== t('Untitled board')
       ? data.name
-      : boardNameFromPath(data.origin) || 'Untitled board';
+      : boardNameFromPath(data.origin) || t('Untitled board');
 
     const clash = list.find((b) => b.id === data.id);
     if (!clash) return { ...data, name: uniqueBoardName(base, list) };
 
     const answer = await this.choose(
-      'You already have this board',
-      `“${clash.name}” on this computer came from the same board as this file - `
-      + 'most likely this file is a copy of it made on another machine. Keeping both '
-      + 'leaves your copy untouched and opens the file alongside it. Replacing writes '
-      + 'the file over your copy, and what is in your copy now would be gone.',
-      [{ id: 'both', label: 'Keep both', primary: true },
-       { id: 'replace', label: 'Replace my copy' }],
+      t('You already have this board'),
+      t('“{name}” on this computer came from the same board as this file - most likely this file is a copy of it made on another machine. Keeping both leaves your copy untouched and opens the file alongside it. Replacing writes the file over your copy, and what is in your copy now would be gone.', { name: clash.name }),
+      [{ id: 'both', label: t('Keep both'), primary: true },
+       { id: 'replace', label: t('Replace my copy') }],
       { cancel: false });
 
     // Escape, or the dialog going away for any other reason, lands on the
     // answer that destroys nothing. Losing a board to a stray keypress is the
     // whole failure this exists to stop.
     if (answer === 'replace') {
-      this.toast('Replaced your copy of “' + clash.name + '”');
+      this.toast(t('Replaced your copy of “{name}”', { name: clash.name }));
       return data;
     }
     return { ...data, id: uid('b'), name: uniqueBoardName(base, list), created: Date.now() };
@@ -804,7 +979,7 @@ class App {
     this.syncUI();
     this.surface.invalidate();
     localStorage.setItem('gazboard.lastBoard', this.store.doc.id);
-    if (!opts.silent) this.toast('Opened ' + this.store.doc.name);
+    if (!opts.silent) this.toast(t('Opened {name}', { name: this.store.doc.name }));
     if (!opts.noMigrationPrompt) this.checkStrayContent(data);
   }
 
@@ -826,19 +1001,32 @@ class App {
     if (!stray.length) return;
 
     const answer = await this.choose(
-      stray.length === 1 ? 'One thing sits outside the page' : `${stray.length} things sit outside the page`,
-      'Pages now hold their ink the way paper does, so anything outside the sheet is clipped. This board was made before that. You can bring it all onto the page, or leave it where it is.',
-      [{ id: 'fit', label: 'Bring it onto the page', primary: true },
-       { id: 'keep', label: 'Leave it where it is' }]
+      stray.length === 1 ? t('One thing sits outside the page') : t('{n} things sit outside the page', { n: stray.length }),
+      t('Pages now hold their ink the way paper does, so anything outside the sheet is clipped. This board was made before that. You can bring it all onto the page, or leave it where it is.'),
+      [{ id: 'fit', label: t('Bring it onto the page'), primary: true },
+       { id: 'keep', label: t('Leave it where it is') }]
     );
     if (answer === 'fit') this.fitContentToPage();
-    else this.toast('Left as it was — the stray parts sit off the paper');
+    else this.toast(t('Left as it was — the stray parts sit off the paper'));
   }
 
   /* ---------------- tools & selection ---------------- */
+  /** The tools that arm themselves and wait for you to drop something. */
+  static PLACING = ['note', 'text', 'shape', 'emoji', 'table'];
+
   setTool(tool) {
     if (tool === 'pen' || tool === 'highlighter') this.lastInkTool = tool;
     if (this.tool === tool) return;
+    /*
+     * Reaching for a tool that drops something remembers what you were doing
+     * before, so backing out can put it back rather than guessing.
+     *
+     * Select is the obvious guess and it is wrong half the time: someone
+     * mid-sentence with the pen who reaches for a sticky note and changes
+     * their mind wants the pen back, not a selection arrow. The other half
+     * is equally wrong the other way. Remembering costs one field.
+     */
+    if (App.PLACING.includes(tool) && !App.PLACING.includes(this.tool)) this.toolBefore = this.tool;
     this.textEditor.commit();
     this.tool = tool;
     // a pen nib left behind by the tool it belonged to is just a stray picture
@@ -850,12 +1038,187 @@ class App {
     this.surface.invalidate();
   }
 
-  setSelection(ids, additive = false) {
+  /**
+   * Select these, and whatever they are grouped with.
+   *
+   * Every path into selection goes through here - a click, a marquee, a lasso,
+   * a press-and-hold, a freshly created object - so widening to whole groups
+   * in this one place is what makes grouping work everywhere at once, rather
+   * than in the four places someone remembered to handle it.
+   *
+   * `whole: false` asks for exactly what was named, which is how a member gets
+   * picked out from inside a group that has been opened for editing.
+   */
+  setSelection(ids, additive = false, { whole = true } = {}) {
     const sel = this.surface.selection;
     if (!additive) sel.clear();
-    for (const id of ids) if (this.store.has(id)) sel.add(id);
+    const wanted = whole ? withGroups(this.store, ids, this.openGroup) : ids;
+    for (const id of wanted) if (this.store.has(id)) sel.add(id);
+    // Stepping outside the opened group closes it again, so the next click on
+    // it picks up the whole thing as usual.
+    if (this.openGroup && ![...sel].some((id) => this.store.get(id)?.groupId === this.openGroup)) {
+      this.openGroup = null;
+    }
+    if (!sel.size) this.multiSelect = false;
     this.syncUI();
     this.surface.invalidate();
+  }
+
+  /** Which group, if any, is currently opened for picking single members. */
+  openGroup = null;
+
+  /*
+   * Picking several things with a finger.
+   *
+   * A mouse says "and this one too" by holding Ctrl. A finger has no Ctrl, and
+   * the gestures that might stand in for it are all taken: a tap selects, a
+   * press-and-hold picks up, two fingers move the board. So on a touchscreen
+   * it is a mode instead - a button on the selection bar that says the next
+   * taps are adding rather than replacing. A mode is a worse idea than a
+   * modifier key in almost every case, but it is visible, it is reversible,
+   * and it does not fight any gesture that already exists.
+   *
+   * It switches itself off when the selection empties, so it can never be left
+   * on in a way that makes the next tap behave strangely.
+   */
+  multiSelect = false;
+
+  setMultiSelect(on) {
+    this.multiSelect = !!on;
+    this.toast(this.multiSelect ? t('Tap things to add them to the selection') : t('Back to normal tapping'),
+      this.multiSelect ? 'select' : 'check', 1600);
+    this.syncUI();
+  }
+
+  /**
+   * A tap or click has chosen this object: replace the selection, or extend it.
+   *
+   * `toggle` is what a modifier key or the add-to-selection mode asks for.
+   * Returns 'added', 'removed' or 'replaced', because the caller needs to know
+   * whether a drag should now be armed - taking something OUT of a selection
+   * is not the beginning of moving what remains.
+   */
+  chooseObject(id, toggle = this.multiSelect) {
+    if (!toggle) { this.setSelection([id]); return 'replaced'; }
+    const ids = new Set(this.surface.selection);
+    const family = withGroups(this.store, [id], this.openGroup);
+    const alreadyIn = family.every((f) => ids.has(f));
+    for (const f of family) alreadyIn ? ids.delete(f) : ids.add(f);
+    this.setSelection([...ids], false, { whole: false });
+    return alreadyIn ? 'removed' : 'added';
+  }
+
+  /** The groups represented in the current selection. */
+  selectedGroups() {
+    return new Set(this.selected.map((o) => o.groupId).filter(Boolean));
+  }
+
+  /**
+   * Tie the selection together.
+   *
+   * Grouping something that is already grouped folds the lot into one new
+   * group rather than nesting - a house made of a roof group and a wall group
+   * becomes a house, and "ungroup" on it gives back the parts rather than two
+   * mystery sub-groups nobody can see the edges of. Nesting is a thing people
+   * ask for and then regret.
+   */
+  groupSelection() {
+    const objs = this.selected.filter((o) => !o.locked);
+    if (objs.length < 2) {
+      this.toast(t('Select two or more things to group'), 'help');
+      return false;
+    }
+    const gid = uid('g');
+    /*
+     * One name survives a regroup, several do not.
+     *
+     * Regrouping pieces that all came from Solar should still be Solar -
+     * that is the "oops, undo that ungroup" case, and retyping the name would
+     * be a small insult. But folding Solar and Wind together into one group
+     * leaves no honest answer to what it is called, and picking whichever
+     * happened to be first is a guess dressed up as a decision. So it comes
+     * out unnamed, and asks to be told.
+     */
+    const names = new Set(objs.map((o) => o.groupName).filter(Boolean));
+    const keep = names.size === 1 ? [...names][0] : null;
+    this.store.updateMany(objs.map((o) => o.id), { groupId: gid, groupName: keep }, 'group');
+    this.openGroup = null;
+    this.setSelection(objs.map((o) => o.id));
+    this.toast(t('{n} items grouped', { n: objs.length }), 'check');
+    return true;
+  }
+
+  /**
+   * Give the selected group a name.
+   *
+   * The name rides on the members beside the group id, which keeps a group one
+   * idea rather than two: no separate table to keep in step, nothing to tidy
+   * up when the last member is deleted, and a copied group keeps its name
+   * because the name travelled with the pieces. Passing null asks; passing a
+   * string sets it without asking, which is what the tests use.
+   */
+  async nameGroup(name) {
+    const gids = [...this.selectedGroups()];
+    if (gids.length !== 1) {
+      this.toast(gids.length ? t('Select one group to name it') : t('Select a group first'), 'help');
+      return false;
+    }
+    const ids = groupMembers(this.store, gids[0]);
+    const current = this.store.get(ids[0])?.groupName || '';
+    let next = name;
+    if (next === undefined || next === null) {
+      next = await this.askText(t('Name this group'),
+        t('Shown on the group\u2019s outline, so a board full of parts says what each part is.'),
+        { value: current, placeholder: t('Solar, Wind, Testing\u2026'), ok: t('Save') });
+      if (next === null) return false;
+    }
+    this.store.updateMany(ids, { groupName: next || null }, next ? 'name group' : 'clear group name');
+    this.surface.invalidate();
+    this.toast(next ? t('Group named \u201c{name}\u201d', { name: next }) : t('Group name removed'), 'check');
+    return true;
+  }
+
+  /** Undo the tying, for every group in the selection. */
+  ungroupSelection() {
+    const gids = this.selectedGroups();
+    if (!gids.size) {
+      this.toast(t('Nothing grouped is selected'), 'help');
+      return false;
+    }
+    const ids = [];
+    for (const gid of gids) ids.push(...groupMembers(this.store, gid));
+    /*
+     * The name goes with the tie.
+     *
+     * Leaving it behind meant a loose object still quietly remembered it was
+     * once part of Solar, and grouping two of those later brought the old name
+     * back from nowhere - a name nobody typed, on a group nobody called that.
+     * A name describes a grouping; when the grouping ends, so does it.
+     *
+     * null rather than undefined: an undefined value can be dropped entirely
+     * by a clone or a round trip through a file, and a patch that loses its
+     * only key silently does nothing at all.
+     */
+    this.store.updateMany(ids, { groupId: null, groupName: null }, 'ungroup');
+    this.openGroup = null;
+    this.setSelection(ids);
+    this.toast(gids.size > 1 ? t('{n} groups undone', { n: gids.size }) : t('Group undone'), 'check');
+    return true;
+  }
+
+  /**
+   * Open a group so one member can be worked on alone.
+   *
+   * Without this, a group is a cage: the roof of a grouped house could never
+   * be recoloured without breaking the house apart first and remembering to
+   * put it back together. Double-clicking steps inside; clicking anything
+   * outside steps back out, which is handled in setSelection.
+   */
+  enterGroup(o) {
+    if (!o?.groupId) return false;
+    this.openGroup = o.groupId;
+    this.setSelection([o.id], false, { whole: false });
+    return true;
   }
 
   get selected() { return [...this.surface.selection].map((id) => this.store.get(id)).filter(Boolean); }
@@ -871,6 +1234,9 @@ class App {
   adoptOverlapping(hosts) {
     const patch = [];
     for (const host of hosts) {
+      // A cover only ever owns what was written on it, by coverFor()'s strict
+      // rule. Locking one must not sweep up the ink around it as well.
+      if (host.type === 'curtain') continue;
       const hb = worldBounds(host);
       const hostIndex = this.store.indexOf(host.id);
       for (const o of this.store.objects) {
@@ -884,7 +1250,8 @@ class App {
         if ((ox * oy) / Math.max(1, b.w * b.h) > 0.6 || (centreIn && ox > 0 && oy > 0)) patch.push(o.id);
       }
     }
-    if (patch.length) this.store.updateMany(patch, { attachedTo: hosts[0].id }, 'attach to locked');
+    const first = hosts.find((o) => o.type !== 'curtain');
+    if (patch.length && first) this.store.updateMany(patch, { attachedTo: first.id }, 'attach to locked');
     return patch.length;
   }
 
@@ -893,7 +1260,7 @@ class App {
     const now = Date.now();
     if (now - (this._lockHintAt || 0) < 2500) return;
     this._lockHintAt = now;
-    this.toast(n > 1 ? `${n} locked items were left alone` : 'This is locked — press the unlock button to edit it', 'lock');
+    this.toast(n > 1 ? t('{n} locked items were left alone', { n }) : t('This is locked — press the unlock button to edit it'), 'lock');
   }
 
   pickAt(wp) { return pick(this.store, wp, 8 / this.surface.cam.z); }
@@ -934,6 +1301,49 @@ class App {
   }
 
   /**
+   * Does a FINGER draw, or move the board?
+   *
+   * The same question as mouseInks, asked of the other hand, and it has to be
+   * asked because one finger cannot do both. Panning with two fingers is what
+   * GazBoard did, and on a phone it is friction on the commonest movement
+   * there is: you reposition the board far more often than you write on it.
+   *
+   * 'auto' answers it from the hardware, the way OneNote and Samsung Notes do.
+   * No stylus has touched this screen, so there is nothing else to draw with -
+   * the finger draws, and a phone with no pen works with nothing to find. An
+   * S Pen has touched it, so the pen draws and the finger is free to move the
+   * board underneath.
+   *
+   * Whatever the answer, a tap still selects and a press-and-hold still picks
+   * things up: those are how a finger reaches an object, and losing them would
+   * trade one kind of friction for a worse one.
+   */
+  get fingerInks() {
+    const f = this.settings.inkWithFinger;
+    if (f === 'yes') return true;
+    if (f === 'no') return false;
+    // 'auto'. Only a touch-first device answers this from the hardware: a
+    // phone or a tablet, where the finger and the pen are the only two things
+    // there are and one of them has to move the board. A laptop with a
+    // touchscreen has a mouse for that already, and quietly changing what its
+    // screen does the first time somebody picks up a stylus would break a
+    // machine that was working.
+    const touchFirst = typeof matchMedia === 'function'
+      && matchMedia('(pointer: coarse)').matches;
+    return !(touchFirst && this.penSeenThisSession);
+  }
+
+  /** The toolbar button: flip it, and the guess stops second-guessing you. */
+  toggleFingerInk() {
+    this.settings.inkWithFinger = this.fingerInks ? 'no' : 'yes';
+    this.saveSettings();
+    this.toast(this.fingerInks
+      ? t('Your finger draws — two fingers move the board')
+      : t('Your finger moves the board — draw with the pen'), 'pen', 2600);
+    this.syncUI?.();
+  }
+
+  /**
    * Called the first time a stylus touches the tablet.
    *
    * Only 'auto' cares, and only for this session: a tablet that is plugged in
@@ -947,34 +1357,17 @@ class App {
     const wasInking = this.mouseInks;
     this.penSeenThisSession = true;
     if (wasInking && !this.mouseInks) {
-      this.toast('Stylus detected — the mouse now pans instead of drawing', 'pen', 5000);
+      this.toast(t('Stylus detected — the mouse now pans instead of drawing'), 'pen', 5000);
       this.surface.invalidate();
     }
   }
 
-  /**
-   * Remember a colour chosen from the selection bar as the default for the
-   * next object of that kind - otherwise every new shape came back black.
-   */
-  rememberColor(type, key, value) {
-    const map = {
-      'stroke:color': 'penColor',
-      'note:color': 'noteColor',
-      'text:color': 'textColor',
-      'table:color': 'textColor',
-      'shape:stroke': 'shapeStroke',
-      'shape:fill': 'shapeFill'
-    };
-    const setting = map[`${type}:${key}`];
-    if (!setting) return;
-    this.settings[setting] = value;
-    if (setting === 'penColor') this.settings.penEffect = 'none';
-    this.saveSettings();
-  }
-
+  /** Returns whether anything was actually changed, so a caller can tell. */
   applyToSelection(patch, onlyType) {
     const ids = this.selected.filter((o) => !onlyType || o.type === onlyType).map((o) => o.id);
-    if (ids.length) this.store.updateMany(ids, patch, 'format');
+    if (!ids.length) return false;
+    this.store.updateMany(ids, patch, 'format');
+    return true;
   }
 
   /** Bring a set of objects into view without selecting them. */
@@ -1038,6 +1431,47 @@ class App {
     this.beginTextEdit(o);
   }
 
+  /*
+   * Stamp an emoji where the board was tapped.
+   *
+   * Square, because every emoji is drawn square and starting it that way means
+   * the first thing anyone does with the handles is make it bigger rather than
+   * un-squash it. Nothing opens afterwards - there is no text to type - so the
+   * tool follows the same "return to select" setting that notes and text do,
+   * and someone stamping a row of ticks can turn that off once and stay put.
+   */
+  addEmojiAt(wp, ch = this.settings.emojiChar) {
+    const size = this.worldSize(this.settings.emojiSize);
+    // Shaped like the character rather than square, so a long rocket lands
+    // long and a wide sign lands wide. The longer side is the chosen size, so
+    // every emoji lands about as big as the last regardless of its shape.
+    const a = emojiAspect(ch);
+    const w = a >= 1 ? size : size * a;
+    const h = a >= 1 ? size / a : size;
+    const o = {
+      id: uid('e'), type: 'emoji', ch,
+      x: wp.x - w / 2, y: wp.y - h / 2, w, h, rotation: 0
+    };
+    // Keeping it on the sheet is the interaction layer's job, and it may not
+    // exist yet when a board is being rebuilt, so ask rather than assume.
+    this.interaction?.placeOnPaper?.(o);
+    this.store.add(o, 'emoji');
+    this.rememberEmoji(ch);
+    this.armToolRestore();
+    if (this.settings.returnToSelect && this.tool !== 'select') this.setTool('select');
+    this.setSelection([o.id]);
+    this.syncUI();
+    return o;
+  }
+
+  /** The last few used, newest first, so the picker can offer them back. */
+  rememberEmoji(ch) {
+    const s = this.settings;
+    s.emojiChar = ch;
+    s.emojiRecent = [ch, ...(s.emojiRecent || []).filter((c) => c !== ch)].slice(0, 16);
+    this.saveSettings();
+  }
+
   addTextAt(wp) {
     const fontSize = this.worldSize(this.settings.textSize);
     const o = { id: uid('t'), type: 'text', x: wp.x, y: wp.y - fontSize, w: this.worldSize(360), h: fontSize * 1.6, text: '', rotation: 0, color: this.settings.textColor, fontSize, align: 'left', valign: 'top', font: this.settings.textFont, background: 'none' };
@@ -1061,6 +1495,212 @@ class App {
     this.setTool('select');
   }
 
+  /* ================================================================= *
+   *  Answer covers
+   *
+   *  A card laid over an answer, a label or the next step of a worked
+   *  example, lifted with a tap when the class is ready for it. It is an
+   *  object on the board like any other - it moves, resizes, locks and
+   *  groups - with one extra fact about it: whether it has been lifted.
+   *  Lifting is an ordinary change to the document, so undo puts the card
+   *  straight back, and a board saved mid-lesson opens with the answers
+   *  that were showing still showing.
+   * ================================================================= */
+
+  /** Drop a cover in the middle of the view, selected, ready to be sized. */
+  addCurtain() {
+    const view = this.surface.cam.viewport(this.surface.width, this.surface.height);
+    const w = this.worldSize(360), hh = this.worldSize(110);
+    const o = {
+      id: uid('cv'), type: 'curtain', x: view.x + view.w / 2 - w / 2, y: view.y + view.h / 2 - hh / 2,
+      w, h: hh, rotation: 0, revealed: false
+    };
+    this.store.add(o, 'answer cover');
+    this.setSelection([o.id]);
+    this.setTool('select');
+    this.showHint('curtain-placed',
+      t('Drag the cover over whatever the class should not see yet. A <b>tap</b> with the pen, a finger or the laser lifts it; <b>undo</b> puts it back.'));
+    return o;
+  }
+
+  /**
+   * Everything written on these covers - their ink, and anything else that
+   * was put down wholly on the card. See coverFor() in tools.js.
+   */
+  onCovers(ids) {
+    const set = new Set(ids);
+    return this.store.objects.filter((o) => o.attachedTo && set.has(o.attachedTo));
+  }
+
+  /**
+   * Lift or lower covers, and what is written on them, as ONE change - so a
+   * single undo puts back the card and its scribbles together.
+   */
+  setCovers(ids, revealed, label) {
+    const ops = [];
+    const set = (o, key, val) => {
+      if ((o[key] ?? false) === val) return;
+      ops.push({ t: 'set', id: o.id, before: { [key]: o[key] }, after: { [key]: val } });
+    };
+    for (const id of ids) { const c = this.store.get(id); if (c) set(c, 'revealed', revealed); }
+    for (const o of this.onCovers(ids)) set(o, 'hidden', revealed);
+    this.store.commit(label, ops);
+  }
+
+  /** Lift one cover. Returns false if there was nothing to lift. */
+  revealCurtain(id) {
+    const o = this.store.get(id);
+    if (!o || o.type !== 'curtain' || o.revealed) return false;
+    this.surface.fadeOut(o);
+    for (const w of this.onCovers([id])) this.surface.fadeOut(w);
+    this.setCovers([id], true, 'reveal');
+    this.dropHidden();
+    this.surface.invalidate();
+    this.syncUI();
+    return true;
+  }
+
+  /** Lift every cover in the selection, as one undo. */
+  revealSelectedCurtains() {
+    const ids = this.selected.filter((o) => o.type === 'curtain' && !o.revealed).map((o) => o.id);
+    if (!ids.length) return 0;
+    for (const id of ids) this.surface.fadeOut(this.store.get(id));
+    for (const w of this.onCovers(ids)) this.surface.fadeOut(w);
+    this.setCovers(ids, true, 'reveal');
+    this.dropHidden();
+    this.surface.invalidate();
+    this.syncUI();
+    return ids.length;
+  }
+
+  /** Nothing that has just gone out of sight can stay selected. */
+  dropHidden() {
+    const keep = this.selected.filter((o) => !ghost(o)).map((o) => o.id);
+    if (keep.length !== this.surface.selection.size) this.setSelection(keep, false, { whole: false });
+  }
+
+  /** Put every lifted cover back, for the next class. One undo takes it back. */
+  coverAllCurtains() {
+    const ids = this.store.objects.filter((o) => o.type === 'curtain' && o.revealed).map((o) => o.id);
+    if (!ids.length) {
+      const any = this.store.objects.some((o) => o.type === 'curtain');
+      this.toast(any ? t('Every answer is already covered') : t('This board has no answer covers'), 'help');
+      return 0;
+    }
+    this.setCovers(ids, false, 'cover answers');
+    this.surface.invalidate();
+    this.syncUI();
+    this.toast(ids.length === 1 ? t('One answer covered again') : t('{n} answers covered again', { n: ids.length }), 'curtain');
+    return ids.length;
+  }
+
+  /**
+   * Offer the Chinese font, once, to someone using the app in Chinese who has
+   * not got it. Only offered: nothing is fetched until they press the button,
+   * and saying nothing is an answer too - it is not asked again. Settings ›
+   * Language always has the button for later.
+   */
+  async offerFontPack() {
+    const pack = packFor(currentLanguage());
+    if (!pack || window.board?.smoke) return;
+    const asked = this.settings.fontOffered || {};
+    if (asked[pack.id] || await isInstalled(pack.id)) return;
+    this.settings.fontOffered = { ...asked, [pack.id]: true };
+    this.saveSettings();
+    this.toast(t('Download the Chinese font for the board ({size})? Chinese text will then look the same on every device.', { size: sizeLabel(pack) }),
+      'update', 15000, { label: t('Download'), onClick: () => this.fetchFontPack(pack.id) });
+  }
+
+  /** Fetch a font pack, saying how it went. Used by the offer and by Settings. */
+  async fetchFontPack(id, onProgress) {
+    this.toast(t('Downloading the Chinese font…'), 'update', 2600);
+    const r = await downloadFontPack(id, { onProgress });
+    if (r.ok) this.toast(t('Chinese font installed — it works offline from now on'), 'check', 4000);
+    else this.toast(t('Could not download the font: {error}. Settings › Language can add a copy you got another way.', { error: r.error }), 'help', 9000);
+    return r;
+  }
+
+  /* ================================================================= *
+   *  Presenting
+   * ================================================================= */
+
+  /**
+   * The board, the whole screen, and nothing else.
+   *
+   * Full screen is asked for and not relied on: a browser can refuse it, an
+   * Android WebView often does, and a test window must not be thrown into
+   * it. Presenting works either way - it is the chrome going away that
+   * matters, and the screen filling is a bonus where it is allowed.
+   */
+  startPresenting({ fullscreen = true } = {}) {
+    if (this.presenting) return;
+    this.presenting = true;
+    this.presentToolsPinned = false;
+    closePopover();
+    if (this.panels.open) this.panels.close();
+    this.commitTextEdit();
+    document.body.classList.add('presenting');
+    document.body.classList.remove('show-tools');
+    this._presentFullscreen = false;
+    const el = document.documentElement;
+    if (fullscreen && !document.fullscreenElement && el.requestFullscreen) {
+      try {
+        const p = el.requestFullscreen();
+        this._presentFullscreen = true;
+        if (p && p.catch) p.catch(() => { this._presentFullscreen = false; });
+      } catch { this._presentFullscreen = false; }
+    }
+    this.presentFit();
+    // The bars have only just gone, so the window's final size lands a frame
+    // or two later - and later still when full screen kicks in.
+    requestAnimationFrame(() => requestAnimationFrame(() => this.presentFit()));
+    this.syncUI();
+    this.toast(this.pageCount > 1
+      ? t('Presenting — Page Down for the next page, Esc to finish')
+      : t('Presenting — Esc to finish'), 'present');
+  }
+
+  stopPresenting() {
+    if (!this.presenting) return;
+    this.presenting = false;
+    this.presentToolsPinned = false;
+    document.body.classList.remove('presenting', 'show-tools');
+    if (this._presentFullscreen && document.fullscreenElement && document.exitFullscreen) {
+      document.exitFullscreen().catch(() => {});
+    }
+    this._presentFullscreen = false;
+    this.surface.resize(true);
+    if (this.pageCount) this.fitToPage(this.currentPageIndex());
+    this.syncUI();
+  }
+
+  /** Sit the page you are on in the (new, bigger) window. */
+  presentFit() {
+    this.surface.resize(true);
+    if (this.pageCount) this.fitToPage(this.currentPageIndex());
+    this.surface.invalidate();
+    syncPresentBar(this);
+  }
+
+  /**
+   * One page on or back. On an infinite canvas there are no pages, and the
+   * keys simply do nothing - guessing at "the next screenful" of a board
+   * nobody laid out in screenfuls would jump somewhere arbitrary.
+   */
+  presentStep(delta) {
+    if (!this.pageCount) return false;
+    const from = this.currentPageIndex();
+    this.goToPage(from + delta);
+    syncPresentBar(this);
+    return this.currentPageIndex() !== from;
+  }
+
+  setPresentTools(on) {
+    this.presentToolsPinned = !!on;
+    document.body.classList.toggle('show-tools', !!on);
+    syncPresentBar(this);
+  }
+
   /**
    * Add or remove a row (axis 0) or a column (axis 1) of the selected table.
    *
@@ -1071,24 +1711,24 @@ class App {
   resizeTable(axis, delta) {
     const sel = [...this.surface.selection].map((id) => this.store.get(id)).filter(Boolean);
     if (sel.length !== 1 || sel[0].type !== 'table' || sel[0].locked) return;
-    const t = sel[0];
+    const tbl = sel[0];
     const key = axis ? 'cols' : 'rows';
     const dim = axis ? 'w' : 'h';
-    const was = Math.max(1, t[key] | 0);
+    const was = Math.max(1, tbl[key] | 0);
     const now = was + delta;
-    if (now < 1) { this.toast(axis ? 'A table needs a column' : 'A table needs a row'); return; }
-    if (now > 40) { this.toast('That is as big as a table gets'); return; }
+    if (now < 1) { this.toast(axis ? t('A table needs a column') : t('A table needs a row')); return; }
+    if (now > 40) { this.toast(t('That is as big as a table gets')); return; }
 
-    const patch = { [key]: now, [dim]: Math.round(t[dim] / was * now) };
+    const patch = { [key]: now, [dim]: Math.round(tbl[dim] / was * now) };
     if (delta < 0) {
       const cells = {};
-      for (const [k, v] of Object.entries(t.cells || {})) {
+      for (const [k, v] of Object.entries(tbl.cells || {})) {
         const rc = k.split(',').map(Number);
         if (rc[axis] < now) cells[k] = v;      // the dropped line takes its text with it
       }
       patch.cells = cells;
     }
-    this.store.update(t.id, patch, delta > 0 ? (axis ? 'add column' : 'add row') : (axis ? 'remove column' : 'remove row'));
+    this.store.update(tbl.id, patch, delta > 0 ? (axis ? 'add column' : 'add row') : (axis ? 'remove column' : 'remove row'));
     this.surface.invalidate();
     this.syncUI();
   }
@@ -1097,7 +1737,7 @@ class App {
     // a canvas-size template only sets the page; it adds nothing to the board
     if (tpl.page) { this.setPageSize(tpl.page.paper, tpl.page.orientation); return; }
     const objs = tpl.build();
-    if (!objs.length) { this.toast('Blank board'); return; }
+    if (!objs.length) { this.toast(t('Blank board')); return; }
     if (this.store.count) {
       let box = null;
       for (const o of objs) {
@@ -1114,7 +1754,7 @@ class App {
     this.surface.cam.fit(b, this.surface.width, this.surface.height);
     this.syncZoom();
     this.surface.invalidate();
-    this.toast(tpl.name + ' added');
+    this.toast(t('{name} added', { name: tpl.name }));
   }
 
   /* ---------------- commands ---------------- */
@@ -1133,13 +1773,21 @@ class App {
         sf.selection.clear();
         break;
       }
-      case 'edit.selectAll': this.setSelection(s.doc.order.filter((id) => !s.get(id)?.locked)); this.setTool('select'); break;
+      case 'edit.selectAll': this.setSelection(s.doc.order.filter((id) => !s.get(id)?.locked && !ghost(s.get(id)))); this.setTool('select'); break;
       case 'edit.copy': this.copy(); break;
       case 'edit.cut': this.copy(); if (sf.selection.size) { s.remove([...sf.selection]); sf.selection.clear(); } break;
-      case 'edit.paste': this.paste(); break;
+      // Every way of asking to paste goes through the one rule. The Edit menu
+      // used to call paste() straight, which knows only about board objects -
+      // so Ctrl+V could hand back objects while something newer sat on the
+      // machine's clipboard, and which of the two answered depended on whether
+      // the menu accelerator or the page saw the key first.
+      case 'edit.paste': return this.pasteAt(null);
       case 'edit.duplicate': this.duplicate(); break;
+      case 'edit.group': this.groupSelection(); break;
+      case 'edit.ungroup': this.ungroupSelection(); break;
+      case 'edit.nameGroup': this.nameGroup(); break;
       case 'edit.clear':
-        this.confirm('Clear canvas?', 'Everything on this board will be removed. You can undo this.', 'Clear')
+        this.confirm(t('Clear canvas?'), t('Everything on this board will be removed. You can undo this.'), t('Clear'))
           .then((ok) => { if (ok) { s.clear(); sf.selection.clear(); } });
         break;
       case 'edit.lock': {
@@ -1150,10 +1798,10 @@ class App {
         if (lock) this.adoptOverlapping(objs);
         const attached = withAttached(s, objs.map((o) => o.id)).length - objs.length;
         this.toast(lock
-          ? 'Locked — it stays put, and anything you draw on it travels with it.'
+          ? t('Locked — it stays put, and anything you draw on it travels with it.')
           : attached
-            ? `Unlocked — ${attached} annotation${attached === 1 ? '' : 's'} will move with it`
-            : 'Unlocked', lock ? 'lock' : 'unlock');
+            ? (attached === 1 ? t('Unlocked — 1 annotation will move with it') : t('Unlocked — {n} annotations will move with it', { n: attached }))
+            : t('Unlocked'), lock ? 'lock' : 'unlock');
         break;
       }
       case 'table.addRow': this.resizeTable(0, +1); break;
@@ -1182,6 +1830,12 @@ class App {
       case 'insert.image': pickAndInsertImage(this); break;
       case 'insert.document': pickAndInsertDocument(this); break;
       case 'insert.table': this.addTable(); break;
+      case 'insert.curtain': this.addCurtain(); break;
+      case 'curtain.reveal': this.revealSelectedCurtains(); break;
+      case 'curtain.coverAll': this.coverAllCurtains(); break;
+      case 'view.present': this.presenting ? this.stopPresenting() : this.startPresenting(); break;
+      case 'view.stopPresenting': this.stopPresenting(); break;
+      case 'timer.open': this.timer.toggle(); break;
 
       case 'export.png': this.checkOffPageBeforeExport().then((go) => go && exportPng(this, { scale: 2 })); break;
       case 'export.pngSelection': exportPng(this, { scale: 2, selectionOnly: true }); break;
@@ -1210,18 +1864,18 @@ class App {
           // lesson?" after pressing New board reads like the wrong dialog, and
           // the safe move against a dialog you did not expect is Cancel - which
           // then looks like New board doing nothing at all.
-          this.confirm('New board?',
-            'You are in a lesson, so this will leave it and give you a board of your own. The lesson is kept — open its link again to come back to it.',
-            'New board')
+          this.confirm(t('New board?'),
+            t('You are in a lesson, so this will leave it and give you a board of your own. The lesson is kept — open its link again to come back to it.'),
+            t('New board'))
             .then(async (ok) => {
               if (!ok) return;
               await room.leaveRoom();
               this.newBoard();
-              this.toast('Left the lesson — this board is yours', 'check');
+              this.toast(t('Left the lesson — this board is yours'), 'check');
             });
           break;
         }
-        this.confirm('New board?', 'Your current board is saved automatically and stays in "My boards".', 'Create')
+        this.confirm(t('New board?'), t('Your current board is saved automatically and stays in "My boards".'), t('Create'))
           .then((ok) => { if (ok) this.newBoard(); });
         break;
       case 'help.shortcuts': this.showShortcuts(); break;
@@ -1248,23 +1902,126 @@ class App {
       r.y = v.y + v.h / 2;
       r.length = Math.min(1200, v.w * 0.7);
       r.thickness = 78 / this.surface.cam.z;
-      this.toast('Ruler on — drag to move, scroll over it to rotate');
+      const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+      this.toast(coarse
+        ? t('Ruler on — drag the middle to move it, drag a blue knob at either end to turn it')
+        : t('Ruler on — drag the grip in the middle to move it, scroll over it or drag a blue knob to turn it'));
     }
     this.surface.invalidate();
   }
 
   /* ---------------- clipboard ---------------- */
+
+  /**
+   * What the machine's clipboard holds right now, as one short string.
+   *
+   * Only the desktop can answer this; the web and Android builds have no way
+   * to look without asking permission, and the answer would arrive too late to
+   * be useful anyway. A null answer is a fine answer - it means paste falls
+   * back to the older, more cautious rule below.
+   */
+  clipboardStamp() {
+    try { return window.board?.clipboardSignature?.() ?? null; } catch { return null; }
+  }
+
+  /**
+   * The machine's clipboard itself - what it holds, not just whether it moved.
+   *
+   * Asked only when somebody has actually chosen Paste, never in passing: on
+   * the desktop this turns a picture into bytes, and on Android it is a round
+   * trip to the app's native side. Null where the clipboard cannot be looked
+   * at, which is an answer rather than a failure.
+   */
+  async clipboardNow() {
+    try { return (await window.board?.clipboardRead?.()) ?? null; } catch { return null; }
+  }
+
+  /** A pasted line of text, as a box on the board. */
+  addPastedText(text, at) {
+    const o = {
+      id: uid('t'), type: 'text', x: at.x - this.worldSize(210), y: at.y - this.worldSize(30),
+      w: this.worldSize(420),
+      h: Math.max(this.worldSize(60), text.split('\n').length * this.worldSize(this.settings.textSize) * 1.3),
+      text: text.trim(), rotation: 0, color: this.settings.textColor,
+      fontSize: this.worldSize(this.settings.textSize),
+      align: 'left', valign: 'top', font: this.settings.textFont, background: 'none'
+    };
+    this.store.add(o, 'paste text');
+    this.setSelection([o.id]);
+    return o;
+  }
+
+  /**
+   * Copy the selection.
+   *
+   * The objects are kept here rather than on the machine's clipboard, because
+   * an object is an id, a position and a group and none of that survives being
+   * turned into text. Nothing is written to the machine's clipboard at all -
+   * copying on a board should not throw away the address or the phone number
+   * somebody had waiting there.
+   *
+   * What IS taken is a fingerprint of the machine's clipboard as it stands
+   * right now. Paste compares it: unchanged means nothing has been copied
+   * anywhere since, so these objects are the most recent copy and are what was
+   * meant. Changed means something else was copied afterwards and that is what
+   * paste is for. Last copy wins, without either side destroying the other's.
+   */
   copy() {
-    this.clipboard = this.selected.map((o) => structuredClone(o));
-    if (this.clipboard.length) this.toast(`${this.clipboard.length} item${this.clipboard.length > 1 ? 's' : ''} copied`);
+    const objs = this.selected;
+    if (!objs.length) return;
+    this.clipboard = objs.map((o) => structuredClone(o));
+    this.clipStamp = this.clipboardStamp();
+    // Where the clipboard cannot be read on the spot - Android, a browser -
+    // ask properly and fill the fingerprint in a moment later. Pasting in the
+    // meantime simply falls back to the objects, which is the safe direction.
+    if (this.clipStamp == null) {
+      this.clipboardNow().then((c) => { if (c?.signature != null) this.clipStamp = c.signature; });
+    }
+    this.toast(this.clipboard.length > 1 ? t('{n} items copied', { n: this.clipboard.length }) : t('{n} item copied', { n: this.clipboard.length }));
+  }
+
+  /**
+   * Were these objects copied more recently than anything else?
+   *
+   * Only ever true when there is a fingerprint to compare against AND it still
+   * matches. Where no fingerprint could be taken this is false, and paste
+   * behaves exactly as it did before any of this existed: a picture or text on
+   * the machine's clipboard wins, and the objects are reached through the
+   * board menu instead.
+   */
+  boardCopyIsNewest() {
+    if (!this.clipboard.length || this.clipStamp == null) return false;
+    const now = this.clipboardStamp();
+    return now != null && now === this.clipStamp;
   }
 
   duplicate() {
     const objs = this.selected;
     if (!objs.length) return;
-    const copies = objs.map((o) => this.cloneWithOffset(o, 28, 28));
+    const copies = this.regroup(objs.map((o) => this.cloneWithOffset(o, 28, 28)));
     this.store.addMany(copies, 'duplicate');
     this.setSelection(copies.map((o) => o.id));
+  }
+
+  /*
+   * Copies of a group are a group of their own.
+   *
+   * Keeping the original group name would quietly weld the copy to the
+   * original: move the new house and the old one comes too, which looks like
+   * the app has lost its mind. Each group name in the batch is swapped for a
+   * fresh one, so the copy holds together exactly as the original did without
+   * being tied to it. A copy of only PART of a group is still a group, which
+   * is what someone who selected three of five things and pressed Ctrl+D
+   * meant.
+   */
+  regroup(copies) {
+    const map = new Map();
+    for (const c of copies) {
+      if (!c.groupId) continue;
+      if (!map.has(c.groupId)) map.set(c.groupId, uid('g'));
+      c.groupId = map.get(c.groupId);
+    }
+    return copies;
   }
 
   cloneWithOffset(o, dx, dy) {
@@ -1278,9 +2035,77 @@ class App {
     return c;
   }
 
+  /**
+   * Paste at a point - whatever was copied last, not whatever the board holds.
+   *
+   * Asking for a paste at a particular spot is still asking for a paste, so it
+   * answers the same question Ctrl+V answers: which was copied more recently,
+   * these objects or whatever is on the machine's clipboard? A phone has no
+   * Ctrl+V at all, so if this preferred the board's own copy it would leave a
+   * phone number copied in a browser with no way onto the board whatsoever -
+   * which is worse than the problem this menu was added to solve.
+   *
+   * Objects arrive centred on the point, keeping their own arrangement; a line
+   * of text or a picture arrives there too. Nothing is thrown away either way:
+   * a board copy that loses to something newer is still sitting there for
+   * afterwards.
+   */
+  /**
+   * Where a paste should land when nobody said where.
+   *
+   * Ctrl+V has no point of its own, so it used to drop the copies a nudge away
+   * from where they came from - which is duplicate, not paste, and on a second
+   * board it is worse than that: the copies keep the coordinates they had on
+   * the first one, so something copied from the far corner of one board lands
+   * in the far corner of the next, miles from anything you are looking at.
+   *
+   * The pointer knows better. Wherever the mouse, stylus or finger last
+   * touched the board is where a paste belongs, as long as that place is still
+   * on screen - pan away and the old spot is meaningless, so the middle of
+   * what you ARE looking at takes over.
+   */
+  pastePoint() {
+    const view = this.surface.cam.viewport(this.surface.width, this.surface.height);
+    const middle = { x: view.x + view.w / 2, y: view.y + view.h / 2 };
+    const p = this.boardPoint;
+    if (!p) return middle;
+    const onScreen = p.x >= view.x && p.x <= view.x + view.w
+      && p.y >= view.y && p.y <= view.y + view.h;
+    return onScreen ? { x: p.x, y: p.y } : middle;
+  }
+
+  async pasteAt(wp) {
+    if (!wp) wp = this.pastePoint();
+    const held = this.clipboard.length;
+    const now = await this.clipboardNow();
+    const moved = !!now && now.signature != null && this.clipStamp != null
+      && now.signature !== this.clipStamp;
+
+    if (now && (moved || !held)) {
+      const point = wp;
+      if (now.image) {
+        try {
+          const blob = await (await fetch(now.image)).blob();
+          await insertImageFiles(this, [new File([blob], clipboardFileName(blob.type || now.kind), { type: blob.type || now.kind || 'image/png' })], point);
+          return;
+        } catch { /* fall through to whatever else is there */ }
+      }
+      if (now.text && now.text.trim()) { this.addPastedText(now.text, point); return; }
+    }
+
+    if (!held) { this.toast(t('Nothing copied yet'), 'help'); return; }
+    const box = this.clipboard.reduce((b, o) => unionBox(b, boundsOf(o)), null);
+    if (!box) { this.paste(); return; }
+    const copies = this.regroup(this.clipboard.map(
+      (o) => this.cloneWithOffset(o, wp.x - (box.x + box.w / 2), wp.y - (box.y + box.h / 2))));
+    this.store.addMany(copies, 'paste');
+    this.setSelection(copies.map((o) => o.id));
+    this.clipboard = copies.map((o) => structuredClone(o));
+  }
+
   paste() {
     if (!this.clipboard.length) return;
-    const copies = this.clipboard.map((o) => this.cloneWithOffset(o, 32, 32));
+    const copies = this.regroup(this.clipboard.map((o) => this.cloneWithOffset(o, 32, 32)));
     this.store.addMany(copies, 'paste');
     this.setSelection(copies.map((o) => o.id));
     this.clipboard = copies.map((o) => structuredClone(o));
@@ -1289,6 +2114,7 @@ class App {
   /* ---------------- UI sync ---------------- */
   syncUI() {
     syncToolbar(this);
+    syncPresentBar(this);
     updateSelectionBar(this);
     this.syncZoom();
     this.interaction?.refreshInkCursor?.();
@@ -1317,7 +2143,7 @@ class App {
     if (!n) return;
     const i = this.currentPageIndex();
     const label = document.getElementById('pageLabel');
-    if (label) label.textContent = `Page ${i + 1} of ${n}`;
+    if (label) label.textContent = t('Page {n} of {total}', { n: i + 1, total: n });
     bar.querySelector('[data-page="prev"]').disabled = i <= 0;
     bar.querySelector('[data-page="next"]').disabled = i >= n - 1;
   }
@@ -1337,8 +2163,8 @@ class App {
     // does not keep.
     document.getElementById('zoombar')?.classList.toggle('view-locked', on);
     btn.title = on
-      ? 'Page is locked - two fingers turn the page. Tap to unlock.'
-      : 'Lock the page so it cannot be moved by accident';
+      ? t('Page is locked - two fingers turn the page. Tap to unlock.')
+      : t('Lock the page so it cannot be moved by accident');
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
   }
 
@@ -1355,7 +2181,7 @@ class App {
     const seen = this.settings.hintsSeen || (this.settings.hintsSeen = {});
     if (seen[id]) return false;
 
-    const close = h('button', { class: 'hint-x', title: 'Dismiss', html: icon('close', 13) });
+    const close = h('button', { class: 'hint-x', title: t('Dismiss'), html: icon('close', 13) });
     const el = h('div', { class: 'hint' }, h('div', { html }), close);
     const go = () => {
       if (!el.isConnected) return;
@@ -1382,7 +2208,15 @@ class App {
   }
 
   showContextMenu(e) { showContextMenu(this, e); }
-  hideMenus() { closePopover(); }
+  /*
+   * Close whatever is open, and say whether there was anything to close.
+   *
+   * The press that shuts a menu should only shut the menu. Handing that answer
+   * back lets the gesture that follows know it was a dismissal rather than a
+   * fresh instruction - see the shape and note tools, which otherwise drop an
+   * object on the very tap that put the menu away.
+   */
+  hideMenus() { const was = popoverOpen(); closePopover(); return was; }
 
   /*
    * Getting rid of whatever is on top.
@@ -1457,11 +2291,180 @@ class App {
   }
 
   /* ---------------- notifications & dialogs ---------------- */
-  toast(message, iconName = 'check', ms = 2600) {
+  /**
+   * Put every setting back the way it shipped.
+   *
+   * Two things are deliberately left alone, because resetting them would do
+   * something rather than merely undo something.
+   *
+   * Sharing stays as it is: switching it off would drop a class mid-lesson,
+   * and switching it ON is not a thing a "reset" button has any business
+   * doing to a person's network. Paired computers are not settings at all and
+   * are never touched here - forgetting those has its own button, with its own
+   * warning, because the other machine has to be told.
+   *
+   * The update check stays too. It is the one setting whose default is "never
+   * asked", and answering it on somebody's behalf is not a default, it is a
+   * decision about the network.
+   */
+  resetSettings() {
+    const keep = {
+      sync: this.settings.sync,
+      updateCheck: this.settings.updateCheck,
+      lastUpdateCheck: this.settings.lastUpdateCheck,
+      skippedVersion: this.settings.skippedVersion,
+      updateAskedAt: this.settings.updateAskedAt,
+      hintsSeen: this.settings.hintsSeen
+    };
+    this.settings = { ...DEFAULT_SETTINGS, ...keep };
+    this.saveSettings();
+    this.interaction.hideInkPointer();
+    this.setTool(this.tool);
+    this.surface.invalidate();
+    this.syncUI();
+  }
+
+  /**
+   * A board is arriving. Say so, quietly.
+   *
+   * The rule this is written around: somebody may be mid-sentence on the board
+   * when a colleague hits Send. Nothing here may steal focus, cover the
+   * canvas, move the toolbar, or cause a single repaint of the drawing.
+   *
+   * So it is one small ring on the top bar - a circle that fills as the board
+   * comes in, with the sender's name beside it. It writes straight into two
+   * DOM nodes and touches nothing else. The board name only appears at the
+   * end, because until the whole thing has arrived and been unsealed there is
+   * no way to know it: the title is inside the encrypted part, which is where
+   * it belongs.
+   */
+  /**
+   * Two soft notes, made on the spot rather than shipped as a file.
+   *
+   * Nothing is downloaded and nothing is bundled: it is a hundred milliseconds
+   * of oscillator, so the app stays the same size and still works with no
+   * network at all. Quiet on purpose - this is a nudge during a lesson, not an
+   * alarm - and it fails silently, because a browser that has not been clicked
+   * yet will refuse to make a sound and that must never break a transfer.
+   */
+  playArrivalChime() {
+    if (this.settings.arrivalSound === false) return;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = this._audio || (this._audio = new Ctx());
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      const now = ctx.currentTime;
+      /*
+       * Three rising notes rather than two, and a triangle wave rather than a
+       * sine.
+       *
+       * A sine is the quietest shape there is: all its energy sits at one
+       * frequency, so in a room with a projector fan and thirty students it
+       * simply vanishes. A triangle carries a few harmonics, which is what
+       * makes a sound carry - it is heard as clearer rather than harsher at
+       * the same volume. Three notes also read as deliberate; two can pass for
+       * a stray system beep.
+       */
+      [[659, 0], [880, 0.1], [1175, 0.2]].forEach(([hz, at]) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.value = hz;
+        // A gentle rise and fall. A square-edged blip reads as an error sound.
+        gain.gain.setValueAtTime(0.0001, now + at);
+        gain.gain.exponentialRampToValueAtTime(0.26, now + at + 0.015);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + at + 0.3);
+        osc.connect(gain).connect(ctx.destination);
+        osc.start(now + at);
+        osc.stop(now + at + 0.32);
+      });
+    } catch { /* no audio on this machine, or not allowed yet */ }
+  }
+
+  showReceiving(info) {
+    if (!info) return;
+    const host = document.getElementById('rxBadge');
+    if (!host) return;
+    const ring = host.querySelector('.rx-ring');
+    const label = host.querySelector('.rx-label');
+
+    if (info.state === 'failed') { host.classList.remove('show'); return; }
+
+    const pct = Math.max(0, Math.min(100, Math.round(info.percent || 0)));
+    // The ring is a conic gradient, so moving it is one style write and the
+    // compositor does the rest. No layout, no paint of anything else.
+    if (ring) {
+      ring.style.background =
+        `conic-gradient(var(--accent) ${pct * 3.6}deg, var(--stroke) 0deg)`;
+      ring.setAttribute('aria-valuenow', String(pct));
+    }
+    if (label) {
+      label.textContent = info.state === 'arrived'
+        ? (info.board ? t('{board} — from {name}', { board: info.board, name: info.name }) : t('Board from {name}', { name: info.name }))
+        : t('{name} — {pct}%', { name: info.name, pct });
+    }
+    /*
+     * The heads-up, once per transfer.
+     *
+     * The complaint this answers: writing on the board, someone hits Send, and
+     * the first you know of it is an "accept this board?" dialog landing over
+     * your sentence. A ring that quietly fills in the corner is no use if you
+     * are looking at the ink.
+     *
+     * So the badge announces itself - a brief pulse and two soft notes - and
+     * then settles down to being a ring. Once, at the start, keyed on the
+     * transfer id so a progress update never re-triggers it.
+     */
+    if (info.id && info.id !== this._rxAnnounced && info.state !== 'arrived') {
+      this._rxAnnounced = info.id;
+      host.classList.add('alert');
+      setTimeout(() => host.classList.remove('alert'), 2600);
+      this.playArrivalChime();
+    }
+
+    host.classList.add('show');
+    host.title = info.state === 'arrived'
+      ? t('A board has just arrived') : t('Receiving a board from {name}', { name: info.name });
+
+    clearTimeout(this._rxHide);
+    host.classList.toggle('done', info.state === 'arrived');
+    if (info.state === 'arrived') {
+      // Leave the finished name up long enough to read, then get out of the way.
+      this._rxHide = setTimeout(() => host.classList.remove('show', 'done'), 4000);
+    } else {
+      // A sender that goes quiet - laptop shut, wifi dropped - must not leave a
+      // ring stuck at 40% forever.
+      this._rxHide = setTimeout(() => host.classList.remove('show'), 20000);
+    }
+  }
+
+  /**
+   * A passing note, optionally with something to do about it.
+   *
+   * `action` turns the note into an offer: {label, onClick}. It is for the case
+   * where the app has just done exactly what was asked and the result still
+   * needs a decision - telling someone their work is now off the paper is only
+   * half a message if the fix is three menus away. The button does the thing
+   * and the note goes.
+   */
+  toast(message, iconName = 'check', ms = 2600, action = null) {
     const host = document.getElementById('toasts');
     const el = h('div', { class: 'toast' }, h('span', { html: icon(iconName, 16), style: 'display:flex' }), h('span', {}, message));
+    let gone = false;
+    const dismiss = () => {
+      if (gone) return;
+      gone = true;
+      el.style.opacity = '0'; el.style.transition = 'opacity .25s';
+      setTimeout(() => el.remove(), 260);
+    };
+    if (action && action.label) {
+      const b = h('button', { class: 'toast-action' }, action.label);
+      b.addEventListener('click', () => { dismiss(); action.onClick?.(); });
+      el.appendChild(b);
+    }
     host.appendChild(el);
-    setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .25s'; setTimeout(() => el.remove(), 260); }, ms);
+    setTimeout(dismiss, ms);
   }
 
   /* ================================================================= *
@@ -1500,7 +2503,7 @@ class App {
     this.saveSettings();
     if (next) this.fitToPage(this.currentPageIndex());
     this.syncUI();
-    this.toast(next ? 'Page locked - two fingers turn the page' : 'Page unlocked - pinch to zoom', next ? 'lock' : 'unlock');
+    this.toast(next ? t('Page locked - two fingers turn the page') : t('Page unlocked - pinch to zoom'), next ? 'lock' : 'unlock');
   }
 
   /** Which sheet the view is looking at, by what is in the middle of the window. */
@@ -1525,12 +2528,13 @@ class App {
     const { pageWorldSize, paperById } = await import('./ui/pdfdialog.js');
 
     if (paperId === 'infinite' || !paperId) {
+      this.rememberCanvas({ paper: 'infinite' });
       this.store.setPages([], 'infinite canvas');
       // What you chose last is what a new board starts as, so nobody has to
       // find a separate setting to make the choice stick.
       this.settings.defaultPaper = 'infinite';
       this.saveSettings();
-      this.toast('Infinite canvas');
+      this.toast(t('Infinite canvas'));
       this.surface.invalidate();
       this.syncUI();
       return;
@@ -1550,9 +2554,33 @@ class App {
     this.settings.defaultPaper = paperId;
     this.settings.defaultOrientation = orientation;
     this.saveSettings();
+    this.rememberCanvas({ paper: paperId, orientation });
     this.store.commit('page size', ops);
     this.fitToPage(Math.min(this.currentPageIndex(), count - 1));
-    this.toast(`${paperById(paperId).label} ${orientation}${count > 1 ? ` — ${count} pages` : ''}`);
+
+    /*
+     * An infinite canvas has no outside, so nothing on it was ever "off the
+     * page". The moment it becomes a pad, work that was spread comfortably
+     * across the desk can be sitting beyond the sheet - still there, still
+     * safe, but not on the paper and not in the export. That is a surprise
+     * worth naming at the moment it happens rather than leaving to be
+     * discovered at print time, and the fix already exists, so the note
+     * carries it: one press brings everything onto the page.
+     */
+    const stray = this.offPageObjects();
+    const orient = orientation === 'portrait' ? t('portrait') : orientation === 'landscape' ? t('landscape') : orientation;
+    const label = count > 1
+      ? t('{paper} {orientation} — {count} pages', { paper: paperById(paperId).label, orientation: orient, count })
+      : t('{paper} {orientation}', { paper: paperById(paperId).label, orientation: orient });
+    if (stray.length) {
+      this.toast(
+        stray.length === 1
+          ? t('{label} — 1 item sits off the paper', { label })
+          : t('{label} — {n} items sit off the paper', { label, n: stray.length }),
+        'template', 7000,
+        { label: t('Fit onto the page'), onClick: () => this.fitContentToPage() }
+      );
+    } else this.toast(label);
     this.surface.invalidate();
     this.syncUI();
   }
@@ -1589,7 +2617,7 @@ class App {
 
   /** Add a sheet after `index` (default: after the one you are looking at). */
   addPage(index = this.currentPageIndex(), { copyOf = -1 } = {}) {
-    if (!this.pageCount) { this.toast('This board is an infinite canvas'); return false; }
+    if (!this.pageCount) { this.toast(t('This board is an infinite canvas')); return false; }
     const at = clamp(index + 1, 0, this.pageCount);
     const size = { ...this.pages[clamp(index, 0, this.pageCount - 1)] };
     const next = this.pages.map((p) => ({ ...p }));
@@ -1598,6 +2626,7 @@ class App {
     // everything from `at` onwards shifts one place down the strip
     const ops = [...this.relayoutOps(this.pages, next, (i) => (i >= at ? i + 1 : i)), this.store.pagesOp(next)];
 
+    const pageGroups = [];
     if (copyOf >= 0 && copyOf < this.pageCount) {
       const srcRect = pageRects(this.pages)[copyOf];
       const dstRect = pageRects(next)[at];
@@ -1606,14 +2635,16 @@ class App {
         const copy = structuredClone(o);
         copy.id = uid(o.type === 'stroke' ? 's' : 'o');
         delete copy.attachedTo;
+        pageGroups.push(copy);
         translateObject(copy, dstRect.x - srcRect.x, dstRect.y - srcRect.y);
         ops.push({ t: 'add', obj: copy });
       }
     }
 
+    this.regroup(pageGroups);
     this.store.commit(copyOf >= 0 ? 'duplicate page' : 'add page', ops);
     this.goToPage(at);
-    this.toast(copyOf >= 0 ? `Page ${at + 1} duplicated` : `Page ${at + 1} of ${next.length}`);
+    this.toast(copyOf >= 0 ? t('Page {n} duplicated', { n: at + 1 }) : t('Page {n} of {total}', { n: at + 1, total: next.length }));
     return true;
   }
 
@@ -1627,15 +2658,17 @@ class App {
    * page up) is one transaction, so a single undo brings the page back intact.
    */
   async deletePage(index = this.currentPageIndex()) {
-    if (this.pageCount <= 1) { this.toast('A pad needs at least one page'); return false; }
+    if (this.pageCount <= 1) { this.toast(t('A pad needs at least one page')); return false; }
     if (index < 0 || index >= this.pageCount) return false;
 
     const doomed = this.store.objects.filter((o) => pageIndexForBox(this.pages, boundsOf(o)) === index);
     if (doomed.length) {
       const answer = await this.choose(
-        `Delete page ${index + 1}?`,
-        `${doomed.length === 1 ? 'One thing is' : doomed.length + ' things are'} on it. Deleting the page deletes them too — one undo brings it all back.`,
-        [{ id: 'delete', label: 'Delete the page', primary: true }, { id: 'keep', label: 'Keep it' }]
+        t('Delete page {n}?', { n: index + 1 }),
+        doomed.length === 1
+          ? t('One thing is on it. Deleting the page deletes them too — one undo brings it all back.')
+          : t('{n} things are on it. Deleting the page deletes them too — one undo brings it all back.', { n: doomed.length }),
+        [{ id: 'delete', label: t('Delete the page'), primary: true }, { id: 'keep', label: t('Keep it') }]
       );
       if (answer !== 'delete') return false;
     }
@@ -1650,7 +2683,7 @@ class App {
     this.store.commit('delete page', ops);
     this.setSelection([]);
     this.goToPage(Math.min(index, next.length - 1));
-    this.toast(`Page deleted — ${next.length} left`);
+    this.toast(t('Page deleted — {n} left', { n: next.length }));
     return true;
   }
 
@@ -1692,13 +2725,13 @@ class App {
    */
   fitContentToPage(margin = 24) {
     const pages = this.pages;
-    if (!pages.length) { this.toast('This board has no page — it is an infinite canvas'); return false; }
+    if (!pages.length) { this.toast(t('This board has no page — it is an infinite canvas')); return false; }
     const rects = pageRects(pages);
 
     if (pages.length === 1) {
       const page = rects[0];
       const b = this.store.contentBounds();
-      if (!b || !b.w || !b.h) { this.toast('Nothing on the board yet'); return false; }
+      if (!b || !b.w || !b.h) { this.toast(t('Nothing on the board yet')); return false; }
       const availW = page.w - margin * 2, availH = page.h - margin * 2;
       const scale = Math.min(availW / b.w, availH / b.h, 1);
       const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
@@ -1712,12 +2745,12 @@ class App {
       }, 'fit to page');
       this.setSelection([]);
       this.fitToPage(0);
-      this.toast(scale < 1 ? `Fitted to the page at ${Math.round(scale * 100)}%` : 'Centred on the page');
+      this.toast(scale < 1 ? t('Fitted to the page at {pct}%', { pct: Math.round(scale * 100) }) : t('Centred on the page'));
       return true;
     }
 
     const stray = this.offPageObjects();
-    if (!stray.length) { this.toast('Everything is already on a page'); return false; }
+    if (!stray.length) { this.toast(t('Everything is already on a page')); return false; }
     this.store.updateMany(stray.map((o) => o.id), (o) => {
       const b = boundsOf(o);
       let i = pageIndexForBox(pages, b);
@@ -1731,7 +2764,7 @@ class App {
       return patchFor(o, copy);
     }, 'fit to pages');
     this.setSelection([]);
-    this.toast(`Brought ${stray.length === 1 ? 'one thing' : stray.length + ' things'} back onto the paper`);
+    this.toast(stray.length === 1 ? t('Brought one thing back onto the paper') : t('Brought {n} things back onto the paper', { n: stray.length }));
     return true;
   }
 
@@ -1774,10 +2807,10 @@ class App {
     if (!off.length) return true;
     const n = off.length;
     const answer = await this.choose(
-      n === 1 ? 'One thing is off the page' : `${n} things are off the page`,
-      'Exports cover the sheet, so anything outside it will be left out. You can shrink the board to fit first, or export the sheet as it is.',
-      [{ id: 'fit', label: 'Fit everything on', primary: true },
-       { id: 'crop', label: 'Export the sheet anyway' }]
+      n === 1 ? t('One thing is off the page') : t('{n} things are off the page', { n }),
+      t('Exports cover the sheet, so anything outside it will be left out. You can shrink the board to fit first, or export the sheet as it is.'),
+      [{ id: 'fit', label: t('Fit everything on'), primary: true },
+       { id: 'crop', label: t('Export the sheet anyway') }]
     );
     if (answer === null) return false;
     if (answer === 'fit') this.fitContentToPage();
@@ -1785,7 +2818,7 @@ class App {
   }
 
   async exportPdfWithSetup() {
-    if (!this.store.objects.length) { this.toast('Nothing on the board to export'); return null; }
+    if (!this.store.objects.length) { this.toast(t('Nothing on the board to export')); return null; }
     if (!(await this.checkOffPageBeforeExport())) return null;
     const { choosePageSetup, paperForPage } = await import('./ui/pdfdialog.js');
     const page = this.store.page;
@@ -1852,7 +2885,7 @@ class App {
       card.appendChild(h('h3', {}, title));
       card.appendChild(h('p', {}, text));
       const row = h('div', { class: 'actions', style: 'flex-wrap:wrap;gap:8px' });
-      if (cancel) row.appendChild(h('button', { class: 'btn', onclick: () => done(null) }, 'Cancel'));
+      if (cancel) row.appendChild(h('button', { class: 'btn', onclick: () => done(null) }, t('Cancel')));
       for (const c of choices) {
         row.appendChild(h('button', { class: 'btn' + (c.primary ? ' primary' : ''), onclick: () => done(c.id) }, c.label));
       }
@@ -1862,7 +2895,39 @@ class App {
     });
   }
 
-  confirm(title, text, confirmLabel = 'OK') {
+  /**
+   * Ask for a line of text. Resolves to the string, or null if they backed out.
+   *
+   * Built the same way as choose() rather than on the browser's prompt(),
+   * which Electron refuses to show at all.
+   */
+  askText(title, text, { value = '', placeholder = '', ok = t('OK') } = {}) {
+    return new Promise((resolve) => {
+      const overlay = document.getElementById('overlay');
+      const card = document.getElementById('overlayCard');
+      card.innerHTML = '';
+      const done = (v) => { this._overlayDismiss = null; overlay.classList.remove('show'); resolve(v); };
+      card.appendChild(h('h3', {}, title));
+      if (text) card.appendChild(h('p', {}, text));
+      const input = h('input', {
+        type: 'text', value, placeholder,
+        style: 'width:100%;box-sizing:border-box;padding:8px 10px;font:inherit;font-size:14px;'
+          + 'border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--text)'
+      });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); done(input.value.trim()); }
+        if (e.key === 'Escape') { e.preventDefault(); done(null); }
+      });
+      card.appendChild(input);
+      card.appendChild(h('div', { class: 'actions' },
+        h('button', { class: 'btn', onclick: () => done(null) }, t('Cancel')),
+        h('button', { class: 'btn primary', onclick: () => done(input.value.trim()) }, ok)));
+      this.showOverlay(() => resolve(null));
+      setTimeout(() => { input.focus(); input.select(); }, 0);
+    });
+  }
+
+  confirm(title, text, confirmLabel = t('OK')) {
     return new Promise((resolve) => {
       const overlay = document.getElementById('overlay');
       const card = document.getElementById('overlayCard');
@@ -1871,7 +2936,7 @@ class App {
       card.appendChild(h('h3', {}, title));
       card.appendChild(h('p', {}, text));
       card.appendChild(h('div', { class: 'actions' },
-        h('button', { class: 'btn', onclick: () => done(false) }, 'Cancel'),
+        h('button', { class: 'btn', onclick: () => done(false) }, t('Cancel')),
         h('button', { class: 'btn primary', onclick: () => done(true) }, confirmLabel)));
       // A dialog that asks before doing something dismisses as "do not".
       this.showOverlay(() => resolve(false));
@@ -1889,16 +2954,23 @@ class App {
    *  never downloads or installs anything; the most it will do is offer to
    *  open the releases page in your browser.
    * ================================================================= */
-  static UPDATE_INTERVAL = 24 * 60 * 60 * 1000;
+  static UPDATE_INTERVAL = 12 * 60 * 60 * 1000;
 
-  /** Consent first if it has never been given, otherwise a quiet daily look. */
+  /** Consent first if it has never been given, otherwise a quiet twice-a-day look. */
   async startUpdateFlow() {
     try {
-      if ((await this.appInfo())?.smoke) return;
-      this.showHint('panning',
-        'Moving around: drag with the <b>middle mouse button</b>, hold <b>Space</b> and drag, '
-        + 'or pick the <b>Pan</b> tool (<b>G</b>) from the toolbar. The right button drags too, '
-        + 'and the scroll wheel works as usual.');
+      const info = await this.appInfo();
+      if (info?.smoke) return;
+      if (info?.isAndroid) {
+        const finger = this.fingerInks ? t('Your <b>finger</b> draws too. ') : t('One <b>finger</b> moves the board. ');
+        const mouse = typeof matchMedia === 'function' && matchMedia('(any-pointer: fine)').matches
+          ? (this.mouseInks ? t('A connected <b>mouse</b> draws too. ') : t('A connected <b>mouse</b> moves the board. ')) : '';
+        this.showHint('android-navigation',
+          t('Move with <b>two fingers</b>; <b>pinch</b> to zoom. With <b>Pen</b> selected, draw with a <b>stylus</b>. {finger}{mouse}Hold an object to select it; tap <b>…</b> for more actions. Change drawing controls in <b>Settings</b>.', { finger, mouse }));
+      } else {
+        this.showHint('panning',
+          t('Moving around: drag with the <b>middle mouse button</b>, hold <b>Space</b> and drag, or pick the <b>Pan</b> tool (<b>G</b>) from the toolbar. The right button drags too, and the scroll wheel works as usual.'));
+      }
       if (this.settings.updateCheck === null || this.settings.updateCheck === undefined) {
         // Dismissing the question means "not now", and not now should last
         // longer than one launch. It used to come back every single time the app
@@ -1915,10 +2987,10 @@ class App {
   async askAboutUpdates() {
     if (this.settings.updateCheck !== null && this.settings.updateCheck !== undefined) return;
     const answer = await this.choose(
-      'Check for updates?',
-      'GazBoard can ask GitHub once a day whether a newer version has been released, and tell you if there is one. It never downloads or installs anything on its own, and nothing about you or your boards is ever sent. Everything else in the app stays offline either way.',
-      [{ id: 'yes', label: 'Yes, tell me about updates', primary: true },
-       { id: 'no', label: 'No, stay fully offline' }],
+      t('Check for updates?'),
+      t('GazBoard can ask GitHub at most twice a day whether a newer version has been released, and tell you if there is one. It never downloads or installs anything on its own, and nothing about you or your boards is ever sent. Everything else in the app stays offline either way.'),
+      [{ id: 'yes', label: t('Yes, tell me about updates'), primary: true },
+       { id: 'no', label: t('No, stay fully offline') }],
       { cancel: false }
     );
     // Escape, or anything that is not a real answer, means "not now" - leave
@@ -1937,24 +3009,41 @@ class App {
   /**
    * @param {object} opts
    * @param {boolean} opts.silent   say nothing when already up to date
-   * @param {boolean} opts.force    ignore the once-a-day limit and any skip
+   * @param {boolean} opts.force    ignore the twice-a-day limit and any skip
    */
   async checkForUpdates({ silent = false, force = false } = {}) {
     if (!force) {
       if (!this.settings.updateCheck) return null;
       if (Date.now() - (this.settings.lastUpdateCheck || 0) < App.UPDATE_INTERVAL) return null;
     }
-    const res = await window.board.checkForUpdate();
-    this.settings.lastUpdateCheck = Date.now();
-    this.saveSettings();
+    const res = await this.fetchUpdate();
+
+    /*
+     * Only a real answer starts the clock.
+     *
+     * The stamp used to go down the moment the call came back, success or not.
+     * So a laptop that happened to be on a train, or behind a hotel portal, or
+     * simply off the network for the minute the app opened, spent the next
+     * half-day believing it had already looked - and the news of a new version
+     * arrived a day late for no reason anybody could see. A failed attempt is
+     * not a look; leave the clock where it was and try again next launch.
+     *
+     * Nothing runs away as a result: the automatic check happens once per
+     * launch, so "try again next time" is one more request when the app is
+     * opened, not a retry loop.
+     */
+    if (res?.ok) {
+      this.settings.lastUpdateCheck = Date.now();
+      this.saveSettings();
+    }
 
     if (!res || !res.ok) {
-      if (!silent) this.toast(res?.error ? `Could not check: ${res.error}` : 'Could not check for updates', 'help');
+      if (!silent) this.toast(res?.error ? t('Could not check: {error}', { error: res.error }) : t('Could not check for updates'), 'help');
       return null;
     }
     const mine = (await this.appInfo())?.version || '0.0.0';
     if (!isNewer(res.version, mine)) {
-      if (!silent) this.toast(`You are on the latest version (${mine})`);
+      if (!silent) this.toast(t('You are on the latest version ({version})', { version: mine }));
       return null;
     }
     // a prerelease is never pushed at someone on a stable build
@@ -1962,16 +3051,27 @@ class App {
     if (!force && this.settings.skippedVersion === res.version) return null;
 
     const answer = await this.choose(
-      `GazBoard ${res.version} is available`,
-      `You are running ${mine}. The download page opens in your browser — your boards and settings are untouched by installing over the top.`,
-      [{ id: 'open', label: 'Open the download page', primary: true },
-       { id: 'later', label: 'Later' },
-       { id: 'skip', label: `Skip ${res.version}` }]
+      t('GazBoard {version} is available', { version: res.version }),
+      t('You are running {version}. The download page opens in your browser — your boards and settings are untouched by installing over the top.', { version: mine }),
+      [{ id: 'open', label: t('Open the download page'), primary: true },
+       { id: 'later', label: t('Later') },
+       { id: 'skip', label: t('Skip {version}', { version: res.version }) }]
     );
     if (answer === 'open') await window.board.openReleases(res.url);
     else if (answer === 'skip') { this.settings.skippedVersion = res.version; this.saveSettings(); }
     return res;
   }
+
+  /**
+   * The one network call in the app, behind a method of its own.
+   *
+   * Everything around it - consent, the gap between looks, what counts as
+   * newer - is logic worth testing, and testing it meant either talking to
+   * GitHub for real (a different answer every day, and none at all offline) or
+   * not testing it. A seam here lets the tests answer for GitHub and leaves
+   * the shipping path exactly one line long.
+   */
+  fetchUpdate() { return window.board.checkForUpdate(); }
 
   /** Cached app:info, so the version is not re-fetched on every call. */
   async appInfo() {
@@ -1980,27 +3080,50 @@ class App {
   }
 
   showShortcuts() {
+    /*
+     * A list of keys is no use to a phone with no keyboard, and worse than no
+     * use if it is the only thing behind a menu item called "Keyboard
+     * shortcuts". It is not removed outright, because plugging a keyboard into
+     * a tablet is a normal thing to do and the keys all still work when you
+     * do - so the sheet leads with the gestures that ARE available, and the
+     * keys follow for whoever has them.
+     */
+    const noKeyboard = typeof matchMedia === 'function'
+      && matchMedia('(pointer: coarse)').matches && matchMedia('(max-width: 760px)').matches;
     const rows = [
-      ['h', 'Tools'],
-      ['Select', 'V'], ['Lasso select', 'L'], ['Laser pointer', 'X'], ['Pan the canvas', 'G'],
-      ['Pen (last colour used)', 'P'], ['Highlighter', 'H'], ['Eraser', 'E'],
-      ['Sticky note', 'N'], ['Text', 'T'], ['Shape', 'S'], ['Ruler', 'Ctrl+R'],
-      ['h', 'Pens'],
+      ...(noKeyboard ? [
+        ['h', t('On this screen')],
+        [t('Draw'), t('Pen, or your finger')],
+        [t('Move the board'), t('One finger — or two, if your finger draws')],
+        [t('Zoom'), t('Pinch with two fingers')],
+        [t('Pick something up'), t('Press and hold it')],
+        [t('Rub out'), t('The eraser, or the button on an S Pen')],
+        ['h', t('With a keyboard attached')]
+      ] : []),
+      ['h', t('Tools')],
+      [t('Select'), 'V'], [t('Lasso select'), 'L'], [t('Laser pointer'), 'X'], [t('Pan the canvas'), 'G'],
+      [t('Pen (last colour used)'), 'P'], [t('Highlighter'), 'H'], [t('Eraser'), 'E'],
+      [t('Sticky note'), 'N'], [t('Text'), 'T'], [t('Shape'), 'S'], [t('Ruler'), 'Ctrl+R'],
+      ['h', t('Pens')],
       ...PENS.map((pen, i) => [pen.label, String(i + 1)]),
-      ['h', 'Canvas'],
-      ['Pan', 'Space + drag, or middle-drag'], ['Zoom', 'Ctrl + wheel, or pinch'],
-      ['Pan while drawing', 'Hold any mouse button, or scroll'],
-      ['Auto-pan while drawing', 'Run the pen into the edge of the window'],
-      ['Zoom in / out', 'Ctrl + = / Ctrl + -'], ['Reset zoom', 'Ctrl+0'], ['Fit to board', 'Ctrl+Shift+F'],
-      ['h', 'Editing'],
-      ['Undo / Redo', 'Ctrl+Z / Ctrl+Y'], ['Copy / Cut / Paste', 'Ctrl+C / Ctrl+X / Ctrl+V'],
-      ['Duplicate', 'Ctrl+D'], ['Delete', 'Delete'], ['Select all', 'Ctrl+A'],
-      ['Edit text of selection', 'F2 or double-click'], ['Nudge selection', 'Arrow keys'],
-      ['Bring to front / Send to back', 'Ctrl+Shift+] / Ctrl+Shift+['],
-      ['Constrain / square', 'Hold Shift while drawing'],
-      ['h', 'Files'],
-      ['New board', 'Ctrl+N'], ['Open board', 'Ctrl+O'], ['Save a copy', 'Ctrl+S'],
-      ['Insert image or document', 'Drag a file onto the canvas']
+      ['h', t('Canvas')],
+      [t('Pan'), t('Space + drag, or middle-drag')], [t('Zoom'), t('Ctrl + wheel, or pinch')],
+      [t('Pan while drawing'), t('Hold any mouse button, or scroll')],
+      [t('Auto-pan while drawing'), t('Run the pen into the edge of the window')],
+      [t('Zoom in / out'), 'Ctrl + = / Ctrl + -'], [t('Reset zoom'), 'Ctrl+0'], [t('Fit to board'), 'Ctrl+Shift+F'],
+      ['h', t('Editing')],
+      [t('Undo / Redo'), 'Ctrl+Z / Ctrl+Y'], [t('Copy / Cut / Paste'), 'Ctrl+C / Ctrl+X / Ctrl+V'],
+      [t('Duplicate'), 'Ctrl+D'], [t('Delete'), 'Delete'], [t('Select all'), 'Ctrl+A'],
+      [t('Edit text of selection'), t('F2 or double-click')], [t('Nudge selection'), t('Arrow keys')],
+      [t('Bring to front / Send to back'), 'Ctrl+Shift+] / Ctrl+Shift+['],
+      [t('Constrain / square'), t('Hold Shift while drawing')],
+      ['h', t('Teaching')],
+      [t('Present'), 'F5'], [t('Stop presenting'), 'Esc'],
+      [t('Next / previous page while presenting'), t('Page Down / Page Up, or the arrows')],
+      [t('Lift an answer cover'), t('Tap it with the pen, a finger or the laser')],
+      ['h', t('Files')],
+      [t('New board'), 'Ctrl+N'], [t('Open board'), 'Ctrl+O'], [t('Save a copy'), 'Ctrl+S'],
+      [t('Insert image or document'), t('Drag a file onto the canvas')]
     ];
     const grid = h('div', { class: 'sc-grid' });
     for (const [a, b] of rows) {
@@ -2011,10 +3134,10 @@ class App {
     const overlay = document.getElementById('overlay');
     const card = document.getElementById('overlayCard');
     card.innerHTML = '';
-    card.appendChild(h('h3', {}, 'Keyboard shortcuts'));
+    card.appendChild(h('h3', {}, t('Keyboard shortcuts')));
     card.appendChild(grid);
     card.appendChild(h('div', { class: 'actions' },
-      h('button', { class: 'btn primary', onclick: () => this.dismissOverlay() }, 'Close')));
+      h('button', { class: 'btn primary', onclick: () => this.dismissOverlay() }, t('Close'))));
     this.showOverlay();
   }
 
@@ -2026,7 +3149,7 @@ class App {
     card.appendChild(h('h3', { style: 'margin-bottom:2px' }, 'GazBoard ' + i.version));
     card.appendChild(h('p', {
       style: 'margin:0 0 14px;font-size:13px;color:var(--text-2);letter-spacing:.02em',
-      html: 'by <b style="color:var(--accent)">theBoringCodes</b>'
+      html: t('by <b style="color:var(--accent)">theBoringCodes</b>')
     }));
     /*
      * This paragraph is a promise, so it has to keep being true.
@@ -2037,30 +3160,31 @@ class App {
      * the edge is, and that the edge is off until somebody moves it.
      */
     card.appendChild(h('p', { html:
-      'A free-form digital whiteboard for pen, sticky notes, shapes, text, images and documents.'
-      + '<br><br>Runs on this computer — no account, no sign-in, no cloud. Your boards are files in a '
-      + 'folder here, and nothing about you or your work is ever uploaded.'
-      + '<br><br>The one exception is <b>sharing on your own network</b>, which is off until you switch '
-      + 'it on in Settings. With it on, you can hand a board straight to another GazBoard on the same '
-      + 'wifi — encrypted, device to device, never through anybody\'s server. Nothing is saved without '
-      + 'you being asked first.' }));
+      t('A free-form digital whiteboard for pen, sticky notes, shapes, text, images and documents.<br><br>Runs on this device — no account, no sign-in, no cloud. Boards save automatically here. Use My boards to reopen them, or Save a copy to keep a board file in a folder you choose.<br><br>The one exception is <b>sharing on your own network</b>, which is off until you switch it on in Settings. With it on, you can hand a board straight to another GazBoard on the same network — encrypted, device to device, never through anybody\'s server. Nothing is saved without you being asked first.') }));
     card.appendChild(h('div', {
       style: 'margin-top:14px;padding-top:12px;border-top:1px solid var(--stroke);font-size:12.5px;line-height:1.8;color:var(--text-2)',
       html:
-        `Developer &nbsp;<b style="color:var(--text)">MD. Fakhruddin Gazzali</b><br>` +
-        `Contact &nbsp;<a href="mailto:fahim9778@gmail.com" target="_blank" style="color:var(--accent)">fahim9778@gmail.com</a><br>` +
-        `Created with <span style="color:#e81123">&hearts;</span> with Claude Cowork` }));
+        t('Developer &nbsp;<b style="color:var(--text)">MD. Fakhruddin Gazzali</b><br>Contact &nbsp;<a href="mailto:fahim9778@gmail.com" target="_blank" style="color:var(--accent)">fahim9778@gmail.com</a><br>Co-created with <span style="color:#e81123">&hearts;</span> by Claude Cowork &amp; GPT Sol, Astra') }));
     const platformDetails = i.electron
-      ? `Office import: <b>${i.libreoffice ? 'LibreOffice detected (high fidelity)' : 'built-in converter (install LibreOffice for higher fidelity)'}</b><br>Electron ${i.electron} · Chromium ${i.chrome}`
-      : `Runtime: <b>Web / Progressive Web App</b> · ${i.pwa ? 'Standalone App' : 'Browser'}<br>Persistence: <b>IndexedDB Persistent Storage</b>`;
+      ? (i.libreoffice
+        ? t('Office import: <b>LibreOffice detected (high fidelity)</b>')
+        : t('Office import: <b>built-in converter (install LibreOffice for higher fidelity)</b>')) +
+        // Where it was found, so "it says not installed" can be answered without guessing.
+        (i.sofficePath ? `<br><code style="font-size:11px;opacity:.75">${i.sofficePath}</code>` : '') +
+        `<br>Electron ${i.electron} · Chromium ${i.chrome}`
+      : i.isAndroid
+        ? t('Runtime: <b>Android</b> · WebView editor<br>Persistence: <b>Private board and image files on this device</b>')
+        : i.pwa
+          ? t('Runtime: <b>Web / Progressive Web App</b> · Standalone App<br>Persistence: <b>IndexedDB Persistent Storage</b>')
+          : t('Runtime: <b>Web / Progressive Web App</b> · Browser<br>Persistence: <b>IndexedDB Persistent Storage</b>');
     card.appendChild(h('div', {
       style: 'margin-top:12px;font-size:11.5px;color:var(--text-2);line-height:1.7',
       html: platformDetails
     }));
     // Next to the version number is where anyone looks for this.
-    const check = h('button', { class: 'btn' }, 'Check for updates');
+    const check = h('button', { class: 'btn' }, t('Check for updates'));
     check.addEventListener('click', async () => {
-      check.textContent = 'Checking…';
+      check.textContent = t('Checking…');
       check.setAttribute('disabled', '');
       this.dismissOverlay();
       await this.checkForUpdates({ force: true });
@@ -2078,28 +3202,115 @@ class App {
       const where = h('div', {
         style: 'margin-top:12px;padding-top:12px;border-top:1px solid var(--stroke);'
           + 'font-size:11.5px;color:var(--text-2);line-height:1.7'
-      }, h('div', {}, i.electron ? 'Your boards are saved on this computer at:' : 'Your boards are stored in:'),
+      }, h('div', {}, i.electron ? t('Your boards are saved on this computer at:') : t('Your boards are stored in:')),
       h('code', { style: 'font-size:11px;display:block;margin:4px 0 0;word-break:break-all' },
         i.userData + (i.electron ? '/boards' : '')));
       if (i.electron) {
-        const openIt = h('button', { class: 'btn' }, 'Open that folder');
+        const openIt = h('button', { class: 'btn' }, t('Open that folder'));
         openIt.style.cssText += 'margin-top:8px;padding:4px 10px;font-size:12.5px';
-        openIt.addEventListener('click', () => window.board.showItem(i.userData + '/boards'));
+        openIt.addEventListener('click', () => {
+          // Older preloads have only showItem. Landing one folder up is worse
+          // than the button doing nothing at all, but not by much.
+          if (window.board.openBoardsFolder) window.board.openBoardsFolder();
+          else window.board.showItem(i.userData + '/boards');
+        });
         where.appendChild(openIt);
+      } else if (i.isAndroid) {
+        where.appendChild(h('p', {}, t('Uninstalling GazBoard or clearing its app storage deletes local boards. Save a copy exports the open board and its images to a location you choose. Export again to keep later edits.')));
+        where.appendChild(h('button', { class: 'btn', onclick: () => {
+          this.dismissOverlay();
+          this.command('board.save');
+        } }, t('Save a copy…')));
       }
       card.appendChild(where);
     }
 
     card.appendChild(h('div', { class: 'actions' },
       check,
-      h('button', { class: 'btn primary', onclick: () => this.dismissOverlay() }, 'Close')));
+      h('button', { class: 'btn primary', onclick: () => this.dismissOverlay() }, t('Close'))));
     this.showOverlay();
   }
 
   /* ---------------- global events ---------------- */
+  /**
+   * Fetch the bundled emoji artwork, then redraw anything already on the board.
+   *
+   * A font named only in CSS is loaded when some text needs it, and canvas
+   * drawing does not count as needing it - so without this call the board
+   * quietly keeps using the machine's own emoji forever. Asking for it here
+   * starts the fetch; when it lands the cached measurements are wrong (they
+   * describe the old artwork) so they go, and the board repaints.
+   *
+   * Every step is optional. An old engine with no document.fonts, a missing
+   * file, a browser that refuses - all of them end with the board drawing
+   * emoji exactly as it did before, which is a worse picture and not a broken
+   * one.
+   */
+  /**
+   * Run something once the machine has a spare moment, or shortly anyway.
+   *
+   * requestIdleCallback waits for a gap between the things the browser is
+   * already doing; the timeout is there because on a busy machine that gap may
+   * never come, and "later" has to mean later rather than never. Falls back to
+   * a plain wait where idle callbacks do not exist.
+   */
+  whenIdle(fn, timeout = 1500) {
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(fn, { timeout });
+    else setTimeout(fn, timeout);
+  }
+
+  /**
+   * Fetch the faces board text is written in, then redraw.
+   *
+   * Same trap as the emoji font below: canvas drawing does not count as a
+   * page needing a font, so a face named only in CSS is never fetched for the
+   * board, and every line keeps being measured in whatever the machine has.
+   * That is the very difference between devices these files exist to remove.
+   *
+   * Every face and both weights are asked for, and the sample carries an
+   * accented letter from outside plain Latin so the latin-ext file comes too -
+   * a name like Łukasz on a board would otherwise fall back, one letter at a
+   * time, to the machine's own font. The files are local, so this is quick;
+   * the board repaints once when all of them are in.
+   *
+   * Resolves either way. A face that fails to load leaves the board drawing
+   * in its fallback, which is how every board looked before this existed.
+   */
+  loadBoardFonts() {
+    if (this._boardFonts) return this._boardFonts;
+    const done = () => { this.surface?.repaintAll?.(); return true; };
+    try {
+      if (!document.fonts?.load) return (this._boardFonts = Promise.resolve(false));
+      const sample = 'Aa \u0141\u0142';
+      const asks = [];
+      for (const f of FONTS) {
+        for (const w of [400, 600]) asks.push(document.fonts.load(`${w} 16px "${f.family}"`, sample));
+      }
+      // Bangla and Arabic typed on a board come from these two (see app.css).
+      // A canvas never asks for a font by itself, so they are asked for here.
+      for (const [family, text] of [['GazBoard Noto Bengali', '\u0995\u0996'], ['GazBoard Noto Arabic', '\u0628\u062A']]) {
+        for (const w of [400, 600]) asks.push(document.fonts.load(`${w} 16px "${family}"`, text));
+      }
+      this._boardFonts = Promise.allSettled(asks).then(done, done);
+    } catch {
+      this._boardFonts = Promise.resolve(false);
+    }
+    return this._boardFonts;
+  }
+
+  loadEmojiFont() {
+    try {
+      if (!document.fonts?.load) return;
+      document.fonts.load('100px "GazBoard Emoji"', '\u2705').then(() => {
+        forgetEmojiMetrics();
+        this.surface.repaintAll();
+      }).catch(() => {});
+    } catch { /* no font loading here; the system emoji still draw */ }
+  }
+
   wireGlobalEvents() {
     const titleEl = document.getElementById('boardTitle');
-    titleEl.addEventListener('change', () => this.store.rename(titleEl.value.trim() || 'Untitled board'));
+    titleEl.addEventListener('change', () => this.store.rename(titleEl.value.trim() || t('Untitled board')));
     titleEl.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') titleEl.blur(); });
 
     window.board.onMenu((id) => this.command(id));
@@ -2124,7 +3335,7 @@ class App {
       this.boardOpenedExplicitly = true;
       // fire-and-forget from the main process: nothing is waiting on it, so a
       // failure has to be reported here rather than escaping as a rejection
-      this.loadBoard(data).catch(() => this.toast('Could not open that board'));
+      this.loadBoard(data).catch(() => this.toast(t('Could not open that board')));
     });
     window.board.onWindowResized(() => {
       // the window changed shape - re-measure now and again after layout settles
@@ -2140,6 +3351,32 @@ class App {
       });
     });
 
+    // Android's Share/Open with and Back actions meet the same import and
+    // dismissal paths as the toolbar. No second editor or document model.
+    window.addEventListener('gazboard:import-file', async ({ detail: path }) => {
+      try {
+        if (/\.(gazboard|openboard|json)$/i.test(path)) {
+          this.boardOpenedExplicitly = true;
+          const data = JSON.parse(new TextDecoder().decode(await window.board.readFile(path)));
+          data.origin = window.board.fileOrigin(path);
+          // Opening another file must not discard edits in the current board.
+          this.commitTextEdit();
+          await this.persist();
+          await this.loadBoard(data, { asCopy: false });
+        } else if (isImagePath(path)) await insertImagesFromPaths(this, [path]);
+        else if (isDocPath(path)) await insertDocument(this, path);
+        else this.toast(t('Choose a board, image, PDF, or supported document'), 'help');
+      } catch (e) { this.toast(t('Could not open file: {error}', { error: e.message }), 'help'); }
+    });
+    window.addEventListener('gazboard:back', () => {
+      if (document.getElementById('overlay')?.classList.contains('show')) { this.dismissOverlay(); return; }
+      if (popoverOpen()) { closePopover(); return; }
+      if (this.textEditor.active) { this.textEditor.commit(); return; }
+      if (this.panels.open) { this.panels.close(); return; }
+      if (this.surface.selection.size) { this.setSelection([]); return; }
+      window.board.background?.();
+    });
+
     document.addEventListener('keydown', (e) => this.onKeyDown(e));
     document.addEventListener('keyup', (e) => { if (e.code === 'Space') this.interaction.spaceDown = false; });
     window.addEventListener('blur', () => { this.interaction.spaceDown = false; });
@@ -2147,30 +3384,34 @@ class App {
     // paste from the system clipboard
     document.addEventListener('paste', async (e) => {
       if (this.textEditor.active) return;
+      /*
+       * Which is newer is settled FIRST, before anything on the clipboard is
+       * looked at. Asking "is there a picture?" before "whose copy is newer?"
+       * let a screenshot taken an hour ago beat two notes copied a second ago,
+       * because a picture is a picture whenever it arrived.
+       */
+      if (this.boardCopyIsNewest()) {
+        e.preventDefault();
+        // Where the pointer is, not where the originals were. preventDefault
+        // has already happened, so there is nothing left to race.
+        this.pasteAt(this.pastePoint());
+        return;
+      }
       const items = [...(e.clipboardData?.items || [])];
       const imageItem = items.find((i) => i.type.startsWith('image/'));
       if (imageItem) {
         e.preventDefault();
         const file = imageItem.getAsFile();
-        const view = this.surface.cam.viewport(this.surface.width, this.surface.height);
-        await insertImageFiles(this, [file], { x: view.x + view.w / 2, y: view.y + view.h / 2 });
+        await insertImageFiles(this, [file], this.pastePoint());
         return;
       }
       const text = e.clipboardData?.getData('text/plain');
       if (text && text.trim()) {
         e.preventDefault();
-        const view = this.surface.cam.viewport(this.surface.width, this.surface.height);
-        const o = {
-          id: uid('t'), type: 'text', x: view.x + view.w / 2 - 200, y: view.y + view.h / 2 - 40,
-          w: this.worldSize(420), h: Math.max(this.worldSize(60), text.split('\n').length * this.worldSize(this.settings.textSize) * 1.3),
-          text: text.trim(), rotation: 0, color: this.settings.textColor, fontSize: this.worldSize(this.settings.textSize),
-          align: 'left', valign: 'top', font: this.settings.textFont, background: 'none'
-        };
-        this.store.add(o, 'paste text');
-        this.setSelection([o.id]);
+        this.addPastedText(text, this.pastePoint());
         return;
       }
-      if (this.clipboard.length) { e.preventDefault(); this.paste(); }
+      if (this.clipboard.length) { e.preventDefault(); this.pasteAt(this.pastePoint()); }
     });
 
     // drag & drop files
@@ -2187,13 +3428,24 @@ class App {
         const docs = paths.filter(isDocPath);
         if (imgs.length) await insertImagesFromPaths(this, imgs);
         for (const d of docs) await insertDocument(this, d);
-        if (!imgs.length && !docs.length) this.toast('Unsupported file type');
+        if (!imgs.length && !docs.length) this.toast(t('Unsupported file type'));
       } else {
         await insertImageFiles(this, files, at);
       }
     });
 
     window.addEventListener('resize', () => this.textEditor.reposition());
+    // Going full screen, or turning a tablet round, while presenting: keep the
+    // page filling the screen.
+    window.addEventListener('resize', () => { if (this.presenting) this.presentFit(); this.timer?.place(); });
+    /*
+     * Leaving full screen by any route - Escape, F11, the system's own button -
+     * ends presenting too. Staying in a chrome-less board inside an ordinary
+     * window would look like the app had lost its toolbars.
+     */
+    document.addEventListener('fullscreenchange', () => {
+      if (!document.fullscreenElement && this.presenting && this._presentFullscreen) this.stopPresenting();
+    });
     document.addEventListener('wheel', () => this.textEditor.reposition(), { passive: true });
     window.addEventListener('beforeunload', () => {
       if (this.settings.autosave) this.persist();
@@ -2208,6 +3460,25 @@ class App {
     const mod = e.ctrlKey || e.metaKey;
 
     if (e.code === 'Space') { this.interaction.spaceDown = true; e.preventDefault(); return; }
+
+    // F5 presents, as it does in every slide program; Shift+F5 too.
+    if (e.key === 'F5') { e.preventDefault(); if (!this.presenting) this.command('view.present'); return; }
+
+    /*
+     * While presenting, the page keys and the arrows turn pages - which is also
+     * what a presentation clicker sends. Arrows go back to nudging the moment
+     * something is selected, because moving a thing you picked up is plainly
+     * what they mean then. Space is left alone: it pans, and a teacher holding
+     * it to drag the board must not be flung onto the next page.
+     */
+    if (this.presenting && !mod) {
+      const step = { PageDown: 1, PageUp: -1, ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+      if (step && !(e.key.startsWith('Arrow') && this.surface.selection.size)) {
+        e.preventDefault();
+        this.presentStep(step);
+        return;
+      }
+    }
 
     if (this.pageCount) {
       if (e.key === 'PageDown') { e.preventDefault(); this.command('page.next'); return; }
@@ -2224,6 +3495,7 @@ class App {
       if (k === 'c') { this.command('edit.copy'); return; }
       if (k === 'x') { this.command('edit.cut'); return; }
       if (k === 'd') { e.preventDefault(); this.command('edit.duplicate'); return; }
+      if (k === 'g') { e.preventDefault(); this.command(e.shiftKey ? 'edit.ungroup' : 'edit.group'); return; }
       if (k === 's') { e.preventDefault(); this.command('board.save'); return; }
       if (k === 'o') { e.preventDefault(); this.command('board.open'); return; }
       if (k === 'n') { e.preventDefault(); this.command('board.new'); return; }
@@ -2239,13 +3511,33 @@ class App {
 
     switch (e.key) {
       case 'Delete': case 'Backspace': e.preventDefault(); this.command('edit.delete'); return;
-      case 'Escape':
-        // A dialog, a popover or the panel is dealt with in initDismissal(),
-        // which stops the event before it reaches here. Getting this far means
-        // nothing is layered over the board, so Escape means "never mind" about
-        // whatever is selected.
+      case 'Escape': {
+        /*
+         * Escape means "never mind", and there are three things it can mean
+         * that about, in the order they are most likely to be on your mind.
+         *
+         * A dialog, a popover or the panel is dealt with in initDismissal(),
+         * which stops the event before it reaches here, so getting this far
+         * means nothing is layered over the board.
+         */
+        // 1. Something is being drawn right now. Abandon it; nothing was ever
+        //    added to the board, so there is nothing to undo afterwards.
+        if (this.interaction?.cancelGesture?.()) return;
+        // Presenting: Escape is how everyone expects to get out of it.
+        if (this.presenting) { this.stopPresenting(); return; }
+        // 2. A tool is armed and waiting to drop something - a note, a text
+        //    box, a shape, an emoji. Changing your mind before the drop puts
+        //    you back where you were, which is the pen if you were writing and
+        //    Select if you were not.
+        if (App.PLACING.includes(this.tool)) {
+          this.setTool(this.toolBefore || 'select');
+          this.syncUI();
+          return;
+        }
+        // 3. Otherwise it is about whatever is selected.
         this.setSelection([]);
         return;
+      }
       case 'F2': {
         const o = this.selected[0];
         if (o && ['note', 'text', 'shape', 'table'].includes(o.type)) this.beginTextEdit(o);
@@ -2276,9 +3568,11 @@ class App {
     // is the commonest thing anyone does while teaching, and doing it by number
     // beats travelling to the toolbar with the mouse.
     if (e.key >= '1' && e.key <= '9') {
-      const pen = PENS[Number(e.key) - 1];
+      const slot = PENS[Number(e.key) - 1];
+      const pen = slot && penById(this.settings, slot.id);
       if (pen) {
         e.preventDefault();
+        this.settings.activePen = pen.id;
         this.settings.penColor = pen.color;
         this.settings.penEffect = pen.effect;
         this.saveSettings();
@@ -2323,6 +3617,9 @@ class App {
       this.panels.syncChanged();
     });
     window.board.sync.onIncoming((msg) => this.queueIncomingBoard(msg));
+    if (window.board.sync.onReceiving) {
+      window.board.sync.onReceiving((info) => this.showReceiving(info));
+    }
     // Routed through a field rather than wired per send, because listeners
     // registered on a preload bridge cannot be taken off again.
     this._onSendBytes = null;
@@ -2359,8 +3656,8 @@ class App {
     this.syncPeers = (st && st.peers) || [];
     if (st && st.running) { this.panels.syncChanged(); return true; }
 
-    this.syncStartError = (st && st.error) || 'it did not start, and gave no reason';
-    this.toast('Sharing on this network could not start: ' + this.syncStartError, 'help', 8000);
+    this.syncStartError = (st && st.error) || t('it did not start, and gave no reason');
+    this.toast(t('Sharing on this network could not start: {error}', { error: this.syncStartError }), 'help', 8000);
     this.panels.syncChanged();
     return false;
   }
@@ -2414,7 +3711,7 @@ class App {
     };
     if (!board || typeof board !== 'object' || !Array.isArray(board.objects)) { reply(null); return; }
 
-    const who = (from && from.name) || 'another computer';
+    const who = (from && from.name) || t('another computer');
     /*
      * Where this copy came from, in the same slot a file's path goes in. That
      * is deliberate: it makes "the same board sent again" behave exactly like
@@ -2432,13 +3729,13 @@ class App {
     const answer = await this.askAboutIncomingBoard({ board, who, mine, waiting: this._incoming.length });
     if (!answer) {
       await reply(null);
-      this.toast('Declined the board from ' + who, 'help');
+      this.toast(t('Declined the board from {name}', { name: who }), 'help');
       return;
     }
 
-    const base = board.name && board.name !== 'Untitled board'
+    const base = board.name && board.name !== 'Untitled board' && board.name !== t('Untitled board')
       ? board.name
-      : 'Board from ' + who;
+      : t('Board from {name}', { name: who });
 
     let data;
     if (mine && answer === 'replace') data = { ...board, origin, id: mine.id, name: base };
@@ -2470,7 +3767,7 @@ class App {
     const saved = await this.saveIncomingBoard(data, open);
     if (!saved) {
       await reply(null);
-      this.toast('Could not save the board from ' + who, 'help', 6000);
+      this.toast(t('Could not save the board from {name}', { name: who }), 'help', 6000);
       return;
     }
     const delivered = await reply(answer === 'replace' ? 'replaced' : 'kept-both');
@@ -2479,14 +3776,13 @@ class App {
     // The board is safely here either way. Whether the sender ever heard about
     // it is a separate fact, and worth saying: their screen will say declined.
     if (!delivered) {
-      this.toast('Kept “' + data.name + '”, but ' + who + ' had already stopped waiting - '
-        + 'their screen will say it was declined', 'help', 8000);
+      this.toast(t('Kept “{board}”, but {name} had already stopped waiting - their screen will say it was declined', { board: data.name, name: who }), 'help', 8000);
     } else if (replacingWhatIsOpen) {
-      this.toast('“' + data.name + '” has been replaced with the copy from ' + who, 'board', 5000);
+      this.toast(t('“{board}” has been replaced with the copy from {name}', { board: data.name, name: who }), 'board', 5000);
     } else {
       this.toast(open
-        ? 'Opened “' + data.name + '” from ' + who
-        : 'Saved “' + data.name + '” - open it from Boards', 'board', 5000);
+        ? t('Opened “{board}” from {name}', { board: data.name, name: who })
+        : t('Saved “{board}” - open it from Boards', { board: data.name }), 'board', 5000);
     }
   }
 
@@ -2535,23 +3831,23 @@ class App {
       let kb = 0;
       try { kb = Math.max(1, Math.round(JSON.stringify(board).length / 1024)); } catch { kb = 0; }
 
-      card.appendChild(h('h3', {}, who + ' is sending you a board'));
+      card.appendChild(h('h3', {}, t('{name} is sending you a board', { name: who })));
       card.appendChild(h('div', { style: 'display:flex;gap:14px;align-items:flex-start;margin:0 0 12px' },
         boardThumb(board.objects, 168, 106),
         h('div', { style: 'font-size:13px;line-height:1.7;min-width:0;flex:1' },
-          h('div', { style: 'font-weight:600;overflow-wrap:anywhere' }, board.name || 'Untitled board'),
+          h('div', { style: 'font-weight:600;overflow-wrap:anywhere' }, board.name || t('Untitled board')),
           h('div', { style: 'color:var(--text-2)' },
-            `${count} item${count === 1 ? '' : 's'}${kb ? ' · ' + kb + ' KB' : ''}`),
+            count === 1
+              ? (kb ? t('{n} item · {kb} KB', { n: count, kb }) : t('{n} item', { n: count }))
+              : (kb ? t('{n} items · {kb} KB', { n: count, kb }) : t('{n} items', { n: count }))),
           waiting
             ? h('div', { style: 'color:var(--text-2);margin-top:4px' },
-              waiting === 1 ? 'One more is waiting behind this' : waiting + ' more are waiting behind this')
+              waiting === 1 ? t('One more is waiting behind this') : t('{n} more are waiting behind this', { n: waiting }))
             : null)));
 
       card.appendChild(h('p', {}, mine
-        ? `You already have “${mine.name}”, which came from this same board. Keeping both leaves your copy `
-          + 'untouched and files this one beside it. Replacing writes this over your copy, and anything you '
-          + 'have added to yours since would be gone.'
-        : 'Nothing is written until you choose.'));
+        ? t('You already have “{name}”, which came from this same board. Keeping both leaves your copy untouched and files this one beside it. Replacing writes this over your copy, and anything you have added to yours since would be gone.', { name: mine.name })
+        : t('Nothing is written until you choose.')));
 
       /*
        * Two questions were tangled together here, and untangling them is the
@@ -2579,17 +3875,17 @@ class App {
       card.appendChild(h('label', {
         style: 'display:flex;align-items:center;gap:9px;font-size:13px;cursor:pointer;'
           + 'padding:9px 11px;border:1px solid var(--stroke);border-radius:6px;margin:0 0 12px'
-      }, openBox, h('span', {}, 'Open it straight away',
+      }, openBox, h('span', {}, t('Open it straight away'),
         h('span', { style: 'display:block;font-size:11.5px;color:var(--text-2);margin-top:1px' },
-          'Off files it in My boards and leaves you where you are'))));
+          t('Off files it in My boards and leaves you where you are')))));
 
       const row = h('div', { class: 'actions', style: 'flex-wrap:wrap;gap:8px' });
-      row.appendChild(h('button', { class: 'btn', onclick: () => done(null) }, 'Decline'));
+      row.appendChild(h('button', { class: 'btn', onclick: () => done(null) }, t('Decline')));
       if (mine) {
-        row.appendChild(h('button', { class: 'btn primary', onclick: () => done('both') }, 'Keep both'));
-        row.appendChild(h('button', { class: 'btn', onclick: () => done('replace') }, 'Replace my copy'));
+        row.appendChild(h('button', { class: 'btn primary', onclick: () => done('both') }, t('Keep both')));
+        row.appendChild(h('button', { class: 'btn', onclick: () => done('replace') }, t('Replace my copy')));
       } else {
-        row.appendChild(h('button', { class: 'btn primary', onclick: () => done('save') }, 'Save it'));
+        row.appendChild(h('button', { class: 'btn primary', onclick: () => done('save') }, t('Save it')));
       }
       card.appendChild(row);
 
@@ -2605,7 +3901,7 @@ class App {
    *
    * @returns {Promise<string|null>} what was typed, or null if it was dismissed
    */
-  promptText(title, text, { placeholder = '', confirmLabel = 'OK', uppercase = false, value = '' } = {}) {
+  promptText(title, text, { placeholder = '', confirmLabel = t('OK'), uppercase = false, value = '' } = {}) {
     return new Promise((resolve) => {
       const overlay = document.getElementById('overlay');
       const card = document.getElementById('overlayCard');
@@ -2625,7 +3921,7 @@ class App {
       if (text) card.appendChild(h('p', {}, text));
       card.appendChild(h('div', { style: 'margin:4px 0 6px' }, input));
       card.appendChild(h('div', { class: 'actions' },
-        h('button', { class: 'btn', onclick: () => done(null) }, 'Cancel'),
+        h('button', { class: 'btn', onclick: () => done(null) }, t('Cancel')),
         h('button', { class: 'btn primary', onclick: submit }, confirmLabel)));
 
       this.showOverlay(() => resolve(null));
@@ -2658,51 +3954,50 @@ class App {
     const tool = info && info.tool;
     const onWindows = tool === 'Windows Firewall' || !tool;
     const onMac = tool === 'macOS firewall';
-    const where = onWindows ? 'Windows PowerShell started as Administrator'
-      : onMac ? 'Terminal - it will ask for your password'
-        : 'a terminal - it will ask for your password';
+    const where = onWindows ? t('Windows PowerShell started as Administrator')
+      : onMac ? t('Terminal - it will ask for your password')
+        : t('a terminal - it will ask for your password');
 
     const overlay = document.getElementById('overlay');
     const card = document.getElementById('overlayCard');
     card.innerHTML = '';
     const done = () => { this._overlayDismiss = null; overlay.classList.remove('show'); };
 
-    card.appendChild(h('h3', {}, 'Letting GazBoard through the firewall by hand'));
+    card.appendChild(h('h3', {}, t('Letting GazBoard through the firewall by hand')));
     card.appendChild(h('p', {}, reason === 'cancelled'
-      ? 'Nothing was changed. If you would rather not give GazBoard permission to do this, '
-        + `these are the commands that do the same thing - run them in ${where}.`
-      : 'GazBoard could not change the firewall on this computer, which usually means the '
-        + 'machine is managed and will not allow it. These are the commands that do it - '
-        + `run them in ${where}, or pass them to whoever looks after the machine.`));
+      ? t('Nothing was changed. If you would rather not give GazBoard permission to do this, these are the commands that do the same thing - run them in {where}.', { where })
+      : reason === 'manual'
+        // Asked for rather than arrived at. Nothing has failed, and saying it
+        // has would be its own small lie - this is the person checking the
+        // firewall themselves because GazBoard said all was well and it wasn't.
+        ? t('GazBoard reads the rules on this computer, which is not the same as another computer proving it can get in - so it can report all is well when it is not. These commands open the way, and do no harm if it is already open. Run them in {where}.', { where })
+        : t('GazBoard could not change the firewall on this computer, which usually means the machine is managed and will not allow it. These are the commands that do it - run them in {where}, or pass them to whoever looks after the machine.', { where })));
 
     const text = cmds.join('\n\n');
     card.appendChild(h('pre', {
       style: 'font-size:11px;line-height:1.6;white-space:pre-wrap;word-break:break-all;'
         + 'background:var(--bg-2, rgba(127,127,127,.08));border:1px solid var(--stroke);'
         + 'border-radius:6px;padding:10px;max-height:190px;overflow:auto;margin:0 0 4px'
-    }, text || 'There is no firewall on this computer that GazBoard knows how to open.'));
+    }, text || t('There is no firewall on this computer that GazBoard knows how to open.')));
 
     card.appendChild(h('p', { style: 'font-size:12px;color:var(--text-2)' },
       onWindows
-        ? 'They allow this one program to be reached on your own private and work networks, '
-          + 'and nowhere else. If your wifi is marked Public in Windows, change it to Private '
-          + 'first, or these will have no effect.'
+        ? t('They allow this one program to be reached on your own private and work networks, and nowhere else. If your network is marked Public in Windows, change it to Private first, or these will have no effect.')
         : onMac
-          ? 'They add GazBoard to the list of apps allowed to accept incoming connections, and '
-            + 'unblock it - being on that list is not the same as being allowed.'
-          : 'They open the two ports GazBoard listens on, and nothing else.'));
+          ? t('They add GazBoard to the list of apps allowed to accept incoming connections, and unblock it - being on that list is not the same as being allowed.')
+          : t('They open the two ports GazBoard listens on, and nothing else.')));
 
     const row = h('div', { class: 'actions' });
     if (text) {
       row.appendChild(h('button', {
         class: 'btn',
         onclick: async () => {
-          try { await navigator.clipboard.writeText(text); this.toast('Commands copied'); }
-          catch { this.toast('Could not reach the clipboard - select the text instead', 'help'); }
+          try { await navigator.clipboard.writeText(text); this.toast(t('Commands copied')); }
+          catch { this.toast(t('Could not reach the clipboard - select the text instead'), 'help'); }
         }
-      }, 'Copy'));
+      }, t('Copy')));
     }
-    row.appendChild(h('button', { class: 'btn primary', onclick: done }, 'Close'));
+    row.appendChild(h('button', { class: 'btn primary', onclick: done }, t('Close')));
     card.appendChild(row);
     this.showOverlay(done);
   }
@@ -2723,6 +4018,10 @@ class App {
     let remember = false;
     let session = null;
     let timer = null;
+    // Shown as the way out if this computer never appears in their list. Read
+    // once: it cannot change while a dialog is open.
+    let addrs = [];
+    try { addrs = ((await window.board.sync.state()) || {}).addresses || []; } catch { addrs = []; }
 
     const stop = () => {
       clearInterval(timer);
@@ -2734,10 +4033,9 @@ class App {
 
     const draw = () => {
       card.innerHTML = '';
-      card.appendChild(h('h3', {}, 'Pairing code'));
+      card.appendChild(h('h3', {}, t('Pairing code')));
       card.appendChild(h('p', {},
-        'On the other computer, switch on sharing, find this computer in its list and press Pair. '
-        + 'It will ask for this code.'));
+        t('On the other computer, switch on sharing, find this computer in its list and press Pair. It will ask for this code.')));
 
       card.appendChild(h('div', {
         style: 'font-size:34px;font-weight:700;letter-spacing:6px;text-align:center;'
@@ -2748,7 +4046,19 @@ class App {
       card.appendChild(h('div', {
         id: 'pairCountdown',
         style: 'text-align:center;font-size:12.5px;color:var(--text-2);margin:-6px 0 14px'
-      }, `Good for another ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} - a fresh code appears here when it runs out`));
+      }, t('Good for another {time} - a fresh code appears here when it runs out', { time: `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` })));
+
+      // The list finds this computer by itself on most networks. On the ones
+      // where it does not - a guest wifi that keeps its clients apart, a
+      // firewall eating the announcement - there is no clue on screen about
+      // what to do instead, and the person is left staring at an empty list.
+      if (addrs.length) {
+        card.appendChild(h('p', { style: 'font-size:12px;color:var(--text-2);margin:-6px 0 14px' },
+          t('If this computer never appears in their list, they can add it by address instead: '),
+          h('span', {
+            style: 'font-family:ui-monospace,Consolas,monospace;font-weight:600;color:var(--text)'
+          }, addrs.map((a) => a.address).join(t(' or ')))));
+      }
 
       const opt = (value, label, hint) => {
         const b = h('button', {
@@ -2764,17 +4074,17 @@ class App {
         });
         return b;
       };
-      card.appendChild(opt(false, 'Just for now',
-        'Whoever pairs with this code is forgotten when GazBoard closes. Right for a class or a meeting.'));
-      card.appendChild(opt(true, 'Remember these computers',
-        'They stay paired and can send you a board any time - and you will still be asked before anything is saved. Right for your own machines.'));
+      card.appendChild(opt(false, t('Just for now'),
+        t('Whoever pairs with this code is forgotten when GazBoard closes. Right for a class or a meeting.')));
+      card.appendChild(opt(true, t('Remember these computers'),
+        t('They stay paired and can send you a board any time - and you will still be asked before anything is saved. Right for your own machines.')));
 
       card.appendChild(h('div', { class: 'actions' },
-        h('button', { class: 'btn primary', onclick: stop }, 'Done')));
+        h('button', { class: 'btn primary', onclick: stop }, t('Done'))));
     };
 
     try { session = await window.board.sync.beginPairing({ remember }); }
-    catch { this.toast('Sharing is not running', 'help'); return; }
+    catch { this.toast(t('Sharing is not running'), 'help'); return; }
 
     draw();
     this.showOverlay(stop);
@@ -2796,8 +4106,7 @@ class App {
       const el = document.getElementById('pairCountdown');
       if (!el) { clearInterval(timer); return; }
       const left = Math.max(0, Math.round((session.expiresAt - Date.now()) / 1000));
-      el.textContent = `Good for another ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`
-        + ' - a fresh code appears here when it runs out';
+      el.textContent = t('Good for another {time} - a fresh code appears here when it runs out', { time: `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}` });
     }, 1000);
   }
 
@@ -2819,13 +4128,13 @@ class App {
     const card = document.getElementById('overlayCard');
     const mb = (n) => (n / 1048576).toFixed(1) + ' MB';
     card.innerHTML = '';
-    card.appendChild(h('h3', {}, 'Sending to ' + who));
-    const label = h('p', {}, `“${boardName}” — ${mb(totalBytes)}`);
+    card.appendChild(h('h3', {}, t('Sending to {name}', { name: who })));
+    const label = h('p', {}, t('“{board}” — {size}', { board: boardName, size: mb(totalBytes) }));
     card.appendChild(label);
     const bar = h('div', { class: 'bar' }, h('i', {}));
     card.appendChild(bar);
     const note = h('p', { style: 'font-size:12px;color:var(--text-2);margin:8px 0 0' },
-      'You can close this — it carries on, and the answer will appear as a message.');
+      t('You can close this — it carries on, and the answer will appear as a message.'));
     card.appendChild(note);
     let closed = false;
     const close = () => {
@@ -2835,7 +4144,7 @@ class App {
       overlay.classList.remove('show');
     };
     card.appendChild(h('div', { class: 'actions' },
-      h('button', { class: 'btn', onclick: close }, 'Close')));
+      h('button', { class: 'btn', onclick: close }, t('Close'))));
     this.showOverlay(close);
     return {
       update: (sent, total) => {
@@ -2844,8 +4153,8 @@ class App {
         bar.firstChild.style.width = Math.round(frac * 100) + '%';
         label.textContent = sent >= total
           // Everything is out; from here it is somebody reading a dialog.
-          ? `Sent. Waiting for ${who} to answer…`
-          : `“${boardName}” — ${mb(sent)} of ${mb(total)}`;
+          ? t('Sent. Waiting for {name} to answer…', { name: who })
+          : t('“{board}” — {sent} of {total}', { board: boardName, sent: mb(sent), total: mb(total) });
       },
       close
     };
@@ -2856,7 +4165,7 @@ class App {
     if (!peer || !peer.deviceId) return false;
     let doc;
     try { doc = exportable(this.store.toJSON({ app: 'GazBoard', version: 1 })); }
-    catch { this.toast('Could not read this board to send it', 'help', 6000); return false; }
+    catch { this.toast(t('Could not read this board to send it'), 'help', 6000); return false; }
 
     // Pictures travel inside the board, because the other machine has no copy
     // of this one's assets folder. A board of imported pages can therefore be
@@ -2864,7 +4173,7 @@ class App {
     let bytes = 0;
     try { bytes = JSON.stringify(doc).length; } catch { bytes = 0; }
     if (bytes > 60 * 1024 * 1024) {
-      this.toast('This board is too big to send over the network - save a copy and carry it instead', 'help', 8000);
+      this.toast(t('This board is too big to send over the network - save a copy and carry it instead'), 'help', 8000);
       return false;
     }
 
@@ -2880,7 +4189,7 @@ class App {
      * because trapping somebody behind a progress bar with no way out is worse
      * than not showing one.
      */
-    const sending = this.showSendProgress(peer.name, doc.name || 'board', bytes);
+    const sending = this.showSendProgress(peer.name, doc.name || t('board'), bytes);
     this._onSendBytes = ({ sent, total }) => sending.update(sent, total);
 
     let r = null;
@@ -2888,23 +4197,31 @@ class App {
     this._onSendBytes = null;
     sending.close();
     if (!r || !r.ok) {
-      this.toast('Could not send it: ' + ((r && r.error) || 'no answer from that computer'), 'help', 8000);
+      this.toast(t('Could not send it: {error}', { error: (r && r.error) || t('no answer from that computer') }), 'help', 8000);
       return false;
     }
     if (!r.result || !r.result.accepted) {
-      this.toast(peer.name + ' declined it', 'help');
+      this.toast(t('{name} declined it', { name: peer.name }), 'help');
       return false;
     }
     this.toast(r.result.outcome === 'replaced'
-      ? peer.name + ' accepted it, replacing their copy'
-      : peer.name + ' accepted it');
+      ? t('{name} accepted it, replacing their copy', { name: peer.name })
+      : t('{name} accepted it', { name: peer.name }));
     return true;
   }
 }
 
-window.addEventListener('DOMContentLoaded', () => {
-  window.app = new App();
-});
+/*
+ * Start once the page is there. Not simply "on DOMContentLoaded": the language
+ * files load before this module runs (see i18n.js), and by the time they have,
+ * that event may well have come and gone.
+ */
+// A flag, not `window.app`: the page has an element with id="app", and the
+// browser hands that out as window.app until something replaces it.
+let booted = false;
+function boot() { if (booted) return; booted = true; window.app = new App(); }
+if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', boot);
+else boot();
 
 /**
  * The `set` payload that moves an object from `o` to `copy`.

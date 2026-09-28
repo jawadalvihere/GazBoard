@@ -1,7 +1,7 @@
 // The canvas view: sizing, the draw loop, culling, overlays.
 
 import { Camera } from './camera.js';
-import { drawBackground, drawObject, drawSelection, drawMemberOutline, drawLockBadge, FONT } from './render.js';
+import { drawBackground, drawObject, drawSelection, drawMemberOutline, drawLockBadge, drawGroupHint, drawLockedOutline, FONT, setDarkBoard, isDarkBoard, faceOf, inkPaint } from './render.js';
 import { worldBounds, boundsOf } from './store.js';
 import { pageRects, pageIndexForBox, pageIndexForBoxIn, stripBounds } from './pages.js';
 import { boxesIntersect } from './util.js';
@@ -29,11 +29,28 @@ export class Surface {
     this.overlays = [];        // fn(ctx, surface) drawn in screen space
     this.wet = null;           // in-progress stroke object
     this.laser = [];           // pointer trail: {x,y,t} world points, never saved
+    /*
+     * What an empty board says before anything is on it. Drawn over the board
+     * rather than placed on it, the way the laser is: it is not an object, so
+     * it cannot be selected, erased, saved, synced, undone or exported, and a
+     * board with nothing on it stays a board with nothing on it. Null turns it
+     * off. See drawGreeting().
+     */
+    this.greeting = 'Happy Inking !!';
+    this._greetingDrawn = null;   // what the last frame drew, for the suite
+    // Answer covers on their way out: id -> { obj, t0 }. See fadeOut().
+    this._fades = new Map();
     this._lockedRev = -1;      // revision the locked-object list was built for
     this._locked = [];
+    this._groupRev = -1;       // and the same for the group outlines
+    this._groupBoxes = null;
+    // Outline every group, or only the one being touched. The app keeps this
+    // in step with its settings; the surface does not reach back for it.
+    this.showGroupOutlines = true;
     this.selection = new Set();
     this.hoverId = null;
     this._raf = null;
+    this._warming = null;      // handle of a queued idle rebuild, see warmFreeze()
     this._onFrame = this._onFrame.bind(this);
 
     const ro = new ResizeObserver(() => this.resize());
@@ -55,7 +72,100 @@ export class Surface {
     };
     try { arm(); } catch { /* older engines: the per-frame check still covers it */ }
   }
-  invalidate() { this.dirty = true; }
+  /**
+   * The object whose text is being typed into right now, as { id, cell }.
+   * Set by the text editor. Its text is left off the canvas while the textarea
+   * is showing the same words in the same place - see drawObject().
+   */
+  editing = null;
+
+  invalidate() { this.dirty = true; this._band = null; this._bandOnly = false; this._fullAsked = true; }
+
+  /**
+   * Repaint from scratch, frozen copy and all.
+   *
+   * invalidate() asks for a new frame, but a frame is allowed to reuse the
+   * frozen copy of the board when nothing in the document has moved. That is
+   * the wrong answer when the change is in HOW things are drawn rather than
+   * what they are - a late-arriving font, a picture that finished loading -
+   * because the document revision never moves and the copy stays convincingly
+   * stale. Throwing the copy away first means the next frame really is drawn
+   * again.
+   */
+  repaintAll() { this._ink = null; this.invalidate(); }
+
+  /*
+   * Repaint only this world-space box on the next frame.
+   *
+   * Anything that calls plain invalidate() before the frame lands wins - a
+   * band and a whole board asked for in the same breath is a whole board, and
+   * that is the safe way round. Several bands in one frame are merged, so a
+   * fast scrub that reports six times between frames still costs one repaint
+   * of the area it covered.
+   */
+  invalidateBand(box) {
+    this.dirty = true;
+    // Somebody has already asked for the whole board this frame. A band cannot
+    // undo that - the safe direction is always towards painting more.
+    if (this._fullAsked) return;
+    if (!this._band) { this._band = { ...box }; this._bandOnly = true; return; }
+    const b = this._band;
+    const x = Math.min(b.x, box.x), y = Math.min(b.y, box.y);
+    const r = Math.max(b.x + b.w, box.x + box.w), t = Math.max(b.y + b.h, box.y + box.h);
+    this._band = { x, y, w: r - x, h: t - y };
+  }
+
+  /**
+   * What the frozen copy is a picture OF.
+   *
+   * Everything that could change the picture is in here: the document
+   * revision, where the camera is, how big the buffer is, and which object is
+   * being typed into - a cell being edited is deliberately left off the canvas
+   * while the textarea shows the same words in the same place. If any of it
+   * moves, the copy is a picture of a board that no longer exists, and the
+   * board is repainted rather than blitted.
+   */
+  freezeKey() {
+    const cam = this.cam;
+    const ed = this.editing ? `${this.editing.id}:${this.editing.cell || ''}` : '';
+    return `${this.store.rev}|${cam.x}|${cam.y}|${cam.z}|${this.width}|${this.height}|${this.dpr}|${ed}`;
+  }
+
+  /**
+   * Paint one finished stroke INTO the frozen copy instead of voiding it.
+   *
+   * Lifting the pen commits the stroke to the document, which moves the
+   * revision, which made the frozen copy stale - so the NEXT stroke had to
+   * repaint every object on the board before it could draw anything. Writing a
+   * word is a dozen short strokes, not one long one, so a crowded board paid
+   * that price a dozen times over and the pen visibly stuttered between
+   * letters. On 2688 objects pulled right back that was about 48ms a stroke.
+   *
+   * The stroke just finished is the only thing that changed, so painting only
+   * it into the copy leaves the copy correct, and the next stroke starts by
+   * blitting a board that is already right. Called by finishStroke(); anything
+   * else that changes the document still moves the key and gets a real
+   * repaint, which is the safe direction.
+   */
+  extendFreeze(obj) {
+    if (!this._ink || !obj) return false;
+    const cam = this.cam;
+    const g = this._ink.canvas.getContext('2d');
+    g.setTransform(this.dpr * cam.z, 0, 0, this.dpr * cam.z, this.dpr * cam.x, this.dpr * cam.y);
+    const onload = () => { this._ink = null; this.invalidate(); };
+    const pages = this.store.doc.pages;
+    const i = pages.length ? pageIndexForBox(pages, boundsOf(obj)) : -1;
+    if (i >= 0) {
+      // ink has to be clipped to its own sheet here exactly as it is on screen,
+      // or a stroke that ran off the paper would be baked into the copy
+      const r = pageRects(pages)[i];
+      g.save(); g.beginPath(); g.rect(r.x, r.y, r.w, r.h); g.clip();
+      drawObject(g, obj, onload, this.editing);
+      g.restore();
+    } else drawObject(g, obj, onload, this.editing);
+    this._ink.key = this.freezeKey();
+    return true;
+  }
 
   /**
    * Sync the drawing buffer to the element's real layout box.
@@ -74,9 +184,15 @@ export class Surface {
     if (!force && w === this.width && h === this.height && dpr === this.dpr) return false;
 
     this.width = w; this.height = h; this.dpr = dpr;
+    this._painted = false;         // the buffer was thrown away with the old size
     const bw = Math.max(1, Math.round(w * dpr)), bh = Math.max(1, Math.round(h * dpr));
     if (this.canvas.width !== bw) this.canvas.width = bw;
     if (this.canvas.height !== bh) this.canvas.height = bh;
+    // A window that just changed shape changes where the paper belongs in it:
+    // a page centred a moment ago is off to one side now, and nothing else
+    // asks for it until the next pan. Cheap, and a no-op on a board with no
+    // pages at all.
+    this.clampCamera();
     this.invalidate();
     this.onResize?.(w, h);
     return true;
@@ -122,6 +238,7 @@ export class Surface {
   }
 
   static LASER_LIFE = 520;       // ms a point stays visible
+  static FADE_MS = 260;          // ms a lifted answer cover takes to melt away
 
   /** Drop trail points that have faded out. */
   pruneLaser() {
@@ -137,6 +254,7 @@ export class Surface {
     this.resize();                 // cheap no-op unless the box or DPR moved
     // a fading trail has to keep repainting even when nothing else changed
     if (this.laser.length) { this.pruneLaser(); this.dirty = true; }
+    if (this._fades.size) this.dirty = true;
     if (!this.dirty) return;
     this.dirty = false;
     this.draw();
@@ -146,10 +264,30 @@ export class Surface {
   screenTransform(ctx = this.ctx) { ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0); }
 
   /** Background and every object, in world space. No selection chrome. */
-  drawScene(ctx, w = this.width, h = this.height, onload = () => this.invalidate()) {
+  drawScene(ctx, w = this.width, h = this.height, onload = () => this.invalidate(), clip = null) {
     const cam = this.cam;
     this.screenTransform(ctx);
     const pages = this.store.doc.pages;
+    /*
+     * `clip` is a world-space box: paint ONLY that, and leave the rest of the
+     * canvas holding the pixels it already had.
+     *
+     * An eraser changes the document on every move, so the frozen copy a pen
+     * stroke leans on is void and the whole board was being repainted - on
+     * 2688 objects pulled right back, far more than a frame's worth, every
+     * move. But an eraser only ever changes the ink it is passing over. The
+     * band under it is a few hundred pixels; the other several million have
+     * not changed and do not need touching.
+     */
+    if (clip) {
+      const a = cam.toScreen(clip.x, clip.y);
+      const b = cam.toScreen(clip.x + clip.w, clip.y + clip.h);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(Math.floor(a.x), Math.floor(a.y),
+        Math.ceil(b.x - a.x) + 1, Math.ceil(b.y - a.y) + 1);
+      ctx.clip();
+    }
     drawBackground(ctx, this.store.doc.background, cam, w, h, pages);
 
     ctx.setTransform(this.dpr * cam.z, 0, 0, this.dpr * cam.z, this.dpr * cam.x, this.dpr * cam.y);
@@ -158,15 +296,30 @@ export class Surface {
     const pad = 64 / cam.z;
     const vbox = { x: view.x - pad, y: view.y - pad, w: view.w + pad * 2, h: view.h + pad * 2 };
 
+    /*
+     * Walk the document in place rather than building a copy of it.
+     *
+     * `store.objects` is a getter that maps and filters the whole order array
+     * into a NEW array every time it is read - 2688 objects allocated, on
+     * every frame, only to be thrown away. Reading the same two fields
+     * directly costs nothing and allocates nothing, which matters most on
+     * exactly the boards where the frame was already tight.
+     */
     const visible = [];
-    for (const o of this.store.objects) {
+    const objs = this.store.doc.objects;
+    for (const id of this.store.doc.order) {
+      const o = objs[id];
       if (!o) continue;
-      if (!boxesIntersect(vbox, worldBounds(o))) continue;
+      const wb = worldBounds(o);
+      if (!boxesIntersect(vbox, wb)) continue;
+      // Outside the band being repainted: its pixels are already right.
+      if (clip && !boxesIntersect(clip, wb)) continue;
       visible.push(o);
     }
 
     if (!pages.length) {
-      for (const o of visible) drawObject(ctx, o, onload);
+      for (const o of visible) drawObject(ctx, o, onload, this.editing);
+      if (clip) ctx.restore();
       return;
     }
 
@@ -182,7 +335,7 @@ export class Surface {
       const i = pageIndexForBoxIn(rects, boundsOf(o));
       if (i >= 0) buckets[i].push(o); else loose.push(o);
     }
-    for (const o of loose) drawObject(ctx, o, onload);
+    for (const o of loose) drawObject(ctx, o, onload, this.editing);
     for (let i = 0; i < rects.length; i++) {
       if (!buckets[i].length) continue;
       const r = rects[i];
@@ -190,19 +343,31 @@ export class Surface {
       ctx.beginPath();
       ctx.rect(r.x, r.y, r.w, r.h);
       ctx.clip();
-      for (const o of buckets[i]) drawObject(ctx, o, onload);
+      for (const o of buckets[i]) drawObject(ctx, o, onload, this.editing);
       ctx.restore();
     }
+    if (clip) ctx.restore();
   }
 
   /** Paint the scene into an offscreen buffer we can blit while inking. */
   _freezeScene(key) {
     const bw = Math.max(1, Math.round(this.width * this.dpr));
     const bh = Math.max(1, Math.round(this.height * this.dpr));
-    let c = this._ink && this._ink.canvas;
+    /*
+     * The buffer is reused between strokes.
+     *
+     * Allocating a fresh full-screen canvas for every stroke is real work at
+     * the exact moment somebody is putting pen to board - on a big display,
+     * several megabytes a stroke, cleared and thrown away, all day. The frame
+     * inside it is never trusted on age: freezeKey() decides whether it is
+     * still a picture of the board as it is now, and it is repainted the
+     * moment it is not.
+     */
+    let c = this._inkCanvas;
     if (!c || c.width !== bw || c.height !== bh) {
       c = document.createElement('canvas');
       c.width = bw; c.height = bh;
+      this._inkCanvas = c;
     }
     const g = c.getContext('2d');
     g.setTransform(1, 0, 0, 1, 0, 0);
@@ -213,18 +378,71 @@ export class Surface {
     return { canvas: c, key };
   }
 
+  /**
+   * Take the photograph before it is needed.
+   *
+   * The board keeps a frozen copy of itself and blits that instead of drawing
+   * every object again - which is what makes a crowded board usable at all.
+   * Pan, zoom or open a board and that copy is a picture of somewhere else, so
+   * it is thrown away. Nothing then takes a new one until something asks, and
+   * the thing that asks is a pen touching down: the first stroke after moving
+   * around paid for repainting the entire board before any ink could appear.
+   * Around 80ms on five thousand strokes, all of it in the worst possible
+   * place.
+   *
+   * The time was already there, unused. Between the hand stopping and the pen
+   * landing there is always a gap - reaction time, deciding where to draw -
+   * and it is far longer than the repaint. So the copy is taken during that
+   * gap instead, and the pen finds it waiting.
+   *
+   * Nothing on the drawing path waits for this. A stroke that starts first
+   * takes the old route and pays what it pays today; the copy is simply not
+   * ready yet, which is exactly the situation before any of this existed. The
+   * key is read when the work RUNS rather than when it is scheduled, so a
+   * second pan mid-wait produces a copy of where the board ended up rather
+   * than a stale one nobody wants.
+   */
+  warmFreeze() {
+    // A timer handle of 0 is a real handle. `!= null` so a queued rebuild is
+    // never mistaken for "nothing queued" and scheduled a second time.
+    if (this._warming != null) return;
+    const run = () => {
+      this._warming = null;
+      // Something is being drawn: the live path owns the copy and builds its
+      // own. Stepping in here would repaint the board underneath a moving pen.
+      if (this.wet || this.laser.length) return;
+      const key = this.freezeKey();
+      if (this._ink && this._ink.key === key) return;
+      this._ink = this._freezeScene(key);
+    };
+    this._warming = (typeof requestIdleCallback === 'function')
+      ? requestIdleCallback(run, { timeout: 300 })
+      : setTimeout(run, 120);
+  }
+
   /** The stroke under the pen, clipped to its own sheet. */
   _drawWet(ctx) {
     const cam = this.cam, pages = this.store.doc.pages;
     ctx.setTransform(this.dpr * cam.z, 0, 0, this.dpr * cam.z, this.dpr * cam.x, this.dpr * cam.y);
     const onload = () => this.invalidate();
-    const wi = pages.length ? pageIndexForBox(pages, boundsOf(this.wet)) : -1;
-    if (wi >= 0) {
-      const r = pageRects(pages)[wi];
-      ctx.save(); ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); ctx.clip();
-      drawObject(ctx, this.wet, onload);
-      ctx.restore();
-    } else drawObject(ctx, this.wet, onload);
+    const one = (obj) => {
+      if (!obj || !obj.points || obj.points.length < 2) return;
+      const wi = pages.length ? pageIndexForBox(pages, boundsOf(obj)) : -1;
+      if (wi >= 0) {
+        const r = pageRects(pages)[wi];
+        ctx.save(); ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); ctx.clip();
+        drawObject(ctx, obj, onload);
+        ctx.restore();
+      } else drawObject(ctx, obj, onload);
+    };
+    /*
+     * A stroke the ruler cut in two is still one gesture in flight. The pieces
+     * already drawn are not on the board yet - they are committed together on
+     * lift - so they are painted here alongside the live one, or the first half
+     * of the line would vanish the moment the pen came out the other side.
+     */
+    if (this.wetPieces) for (const piece of this.wetPieces) one(piece);
+    one(this.wet);
   }
 
   /**
@@ -251,15 +469,68 @@ export class Surface {
      * crawl on a heavy board; it now blits the same frozen copy a stroke uses.
      */
     if (this.wet || this.laser.length) {
-      const key = `${this.store.rev}|${cam.x}|${cam.y}|${cam.z}|${w}|${h}|${this.dpr}`;
+      const key = this.freezeKey();
       if (!this._ink || this._ink.key !== key) this._ink = this._freezeScene(key);
       this.screenTransform();
       ctx.drawImage(this._ink.canvas, 0, 0, w, h);
       if (this.wet) this._drawWet(ctx);
+    } else if (this._bandOnly && this._band && this._painted && !this.showsGreeting() && !this._fades.size) {
+      /*
+       * Only the band that changed. The rest of the canvas keeps the pixels it
+       * already has, which is the whole point: on a big board an eraser move
+       * costs the area under the eraser rather than the entire document.
+       *
+       * `_painted` is the guard. A band is only meaningful on top of a frame
+       * that is already correct, so the very first paint after a resize, a
+       * board load or a camera move is always the full one.
+       */
+      this.drawScene(ctx, w, h, () => this.invalidate(), this._band);
+    } else if (this._ink && this._ink.key === this.freezeKey()) {
+      /*
+       * Nothing has changed since the copy was taken, so blit it.
+       *
+       * This is the frame AFTER a pen lift, and on a crowded board it was the
+       * whole remaining cost of handwriting. Printing rather than joining
+       * letters means a lift after every letter, and each lift landed here and
+       * repainted all 2688 objects - measured at 32ms a letter, worst case
+       * over 100ms, while the strokes themselves cost 0.02ms a move.
+       *
+       * The key is what makes this safe rather than a stale-picture bug: it
+       * carries the document revision, the camera, the buffer size and the
+       * cell being typed into, and every document change goes through the
+       * store and moves the revision. If the key still matches, the copy is
+       * this board, and blitting it is the same picture as painting it.
+       */
+      this.screenTransform();
+      ctx.drawImage(this._ink.canvas, 0, 0, w, h);
+      this._painted = true;
     } else {
-      this._ink = null;
-      this.drawScene(ctx, w, h);
+      /*
+       * A late-decoding image has to drop the frozen copy as well as ask for a
+       * repaint. Asking for a repaint alone would find the key unchanged - an
+       * image arriving is not a document change - and blit the copy that was
+       * taken before the picture existed, so it would never appear.
+       */
+      this.drawScene(ctx, w, h, () => { this._ink = null; this.invalidate(); });
+      this._painted = true;
     }
+
+    /*
+     * "How much needs painting" is a question about ONE frame.
+     *
+     * Cleared here rather than in the frame loop, because draw() is reached by
+     * other routes - an export, a test, a forced repaint - and a flag left
+     * standing from a previous frame quietly turns every later band request
+     * into a whole-board repaint. Which is exactly what it did.
+     */
+    this._fullAsked = false;
+    this._band = null;
+    this._bandOnly = false;
+
+    // The board is drawn and nothing is in flight: a good moment to have the
+    // frozen copy ready for whatever comes next. See warmFreeze().
+    if (!this.wet && !this.laser.length
+        && (!this._ink || this._ink.key !== this.freezeKey())) this.warmFreeze();
 
     // ---- screen-space overlays (CSS pixels) ----
     // Never cached: selection handles, hover and lock badges have to track the
@@ -295,7 +566,60 @@ export class Surface {
     }
     for (const o of this._locked) {
       if (!boxesIntersect(vbox, worldBounds(o))) continue;
+      drawLockedOutline(ctx, cam, o);
       drawLockBadge(ctx, cam, o);
+    }
+
+    /*
+     * Groups worth pointing out: the one being touched, and the one under the
+     * cursor. Their outlines are measured when the document changes rather
+     * than every frame, for the same reason the locked list is.
+     */
+    const active = new Set();
+    for (const id of this.selection) {
+      const o = this.store.get(id);
+      if (o?.groupId) active.add(o.groupId);
+    }
+    const hovered = this.hoverId ? this.store.get(this.hoverId) : null;
+    if (hovered?.groupId) active.add(hovered.groupId);
+    // Every group on the board is outlined, faintly, so that a finished poster
+    // says which of its parts are tied together without being prodded first.
+    // Anyone who finds that busy can switch it off in Settings.
+    const showAll = this.showGroupOutlines !== false;
+    const gids = showAll ? null : active;
+    if (showAll || gids.size) {
+      if (this._groupRev !== this.store.rev || !this._groupBoxes) {
+        this._groupRev = this.store.rev;
+        this._groupBoxes = new Map();
+        for (const o of this.store.objects) {
+          if (!o?.groupId) continue;
+          const b = worldBounds(o);
+          const cur = this._groupBoxes.get(o.groupId);
+          if (!cur) {
+            this._groupBoxes.set(o.groupId, { x: b.x, y: b.y, r: b.x + b.w, d: b.y + b.h, name: o.groupName || '' });
+            continue;
+          }
+          /*
+           * Every member has to agree on the name for it to be shown.
+           *
+           * The name is stored on the pieces, so one piece carrying a name the
+           * others do not is not a group called that - it is a leftover from
+           * some earlier grouping. Taking the first one found would let an old
+           * name reappear on a group nobody gave it to, which is worse than
+           * showing no name at all.
+           */
+          if ((o.groupName || '') !== cur.name) cur.name = '';
+          cur.x = Math.min(cur.x, b.x); cur.y = Math.min(cur.y, b.y);
+          cur.r = Math.max(cur.r, b.x + b.w); cur.d = Math.max(cur.d, b.y + b.h);
+        }
+      }
+      for (const gid of (gids || this._groupBoxes?.keys() || [])) {
+        const c = this._groupBoxes?.get(gid);
+        if (!c) continue;
+        const box = { x: c.x, y: c.y, w: c.r - c.x, h: c.d - c.y };
+        if (!boxesIntersect(vbox, box)) continue;
+        drawGroupHint(ctx, cam, box, active.has(gid), c.name);
+      }
     }
 
     if (this.selection.size) {
@@ -305,11 +629,90 @@ export class Surface {
       if (box) drawSelection(ctx, box, locked ? { handles: false, dashed: true } : { rotate: true });
     }
 
+    this.drawFades(ctx);
+
+    // under everything else that floats, the laser included
+    this.drawGreeting(ctx);
+
     for (const fn of this.overlays) fn(ctx, this);
 
     // The laser goes on last: it is a pointing device, so it belongs above
     // everything, selection handles included.
     this.drawLaser(ctx);
+  }
+
+  /**
+   * Let a lifted answer cover melt away rather than blink out.
+   *
+   * The document already says it is revealed, so the board underneath is
+   * painted without it and nothing about saving, undo or export has to know
+   * a fade exists. This is only the last quarter-second of its picture,
+   * drawn over the top and getting fainter. A blink reads as a glitch; a
+   * fade reads as "and here is the answer".
+   */
+  fadeOut(obj, ms = Surface.FADE_MS) {
+    if (!obj) return;
+    this._fades.set(obj.id, { obj: { ...obj, revealed: false, hidden: false }, t0: performance.now(), ms });
+    this.dirty = true;
+  }
+
+  drawFades(ctx, now = performance.now()) {
+    if (!this._fades.size) return;
+    const cam = this.cam;
+    ctx.save();
+    ctx.setTransform(this.dpr * cam.z, 0, 0, this.dpr * cam.z, this.dpr * cam.x, this.dpr * cam.y);
+    for (const [id, f] of this._fades) {
+      const k = (now - f.t0) / f.ms;
+      if (k >= 1) { this._fades.delete(id); continue; }
+      ctx.globalAlpha = 1 - k;
+      drawObject(ctx, f.obj);
+    }
+    ctx.restore();
+  }
+
+  /**
+   * Is the board empty enough to say hello?
+   *
+   * Nothing on it, and no ink in flight: the greeting goes the moment a pen
+   * touches down, not when the stroke is finished, because a greeting still
+   * sitting under the first line somebody is drawing is in their way. If that
+   * stroke comes to nothing - a palm, a tap too short to keep - the board is
+   * still empty and it comes back on its own.
+   */
+  showsGreeting() {
+    return !!this.greeting && !this.wet && !!this.store && this.store.objects.length === 0;
+  }
+
+  /**
+   * "Happy Inking !!", faintly, in the middle of the window.
+   *
+   * Screen-sized rather than board-sized, so it reads the same at any zoom
+   * and stays put while the board is panned underneath. In the Handwriting
+   * face, in the board's own ink - dark on a light board, light on a dark
+   * one - and far enough towards the background that nobody mistakes it for
+   * something they wrote.
+   *
+   * Drawn in full every frame it shows, never as part of a repaint of just
+   * the strip an eraser touched: text this faint painted over its own last
+   * copy would darken with every move.
+   */
+  drawGreeting(ctx) {
+    this._greetingDrawn = null;
+    if (!this.showsGreeting()) return;
+    const w = this.width, h = this.height;
+    const size = Math.round(Math.max(28, Math.min(72, Math.min(w, h) * 0.09)));
+    const font = `400 ${size}px ${faceOf('marker')}`;
+    const color = inkPaint(null);
+    const x = w / 2, y = h / 2;
+    ctx.save();
+    ctx.font = font;
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.28;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(this.greeting, x, y);
+    ctx.restore();
+    this._greetingDrawn = { text: this.greeting, x, y, size, font, color };
   }
 
   /**
@@ -415,15 +818,49 @@ export class Surface {
     if (!b) return;
     const { cam } = this;
     const sw = b.w * cam.z, sh = b.h * cam.z;
-    const keepX = Math.min(160, sw), keepY = Math.min(160, sh);
-    const loX = keepX - b.x * cam.z - sw, hiX = this.width - keepX - b.x * cam.z;
+
+    /*
+     * Sideways, paper is not like a canvas.
+     *
+     * A pad has a fixed width and an unlimited height: page two sits below page
+     * one, so scrolling DOWN is how you read it and a little overshoot at the
+     * ends is welcome. Scrolling SIDEWAYS reaches nothing - there is no more
+     * paper out there, only desk - and every pixel spent on it is a pixel of
+     * the page pushed off the other edge. People kept sliding A4 half out of
+     * the window by accident and had to drag it back.
+     *
+     * So the two directions get different rules. Left and right: the page is
+     * pinned to the middle when it fits, and when it does not - because the
+     * zoom is past what the window holds - it may move only as far as its own
+     * edges, never showing desk beside it. Up and down is left exactly as it
+     * was, because that is the direction a pad is meant to travel in.
+     */
+    if (sw <= this.width) cam.x = (this.width - sw) / 2 - b.x * cam.z;
+    else cam.x = Math.max(this.width - sw - b.x * cam.z, Math.min(cam.x, -b.x * cam.z));
+
+    const keepY = Math.min(160, sh);
     const loY = keepY - b.y * cam.z - sh, hiY = this.height - keepY - b.y * cam.z;
-    if (loX <= hiX) cam.x = Math.max(loX, Math.min(cam.x, hiX));
     if (loY <= hiY) cam.y = Math.max(loY, Math.min(cam.y, hiY));
   }
 
   /** Render the board (or a region) to an offscreen canvas - used by export. */
+  /**
+   * Render to an offscreen canvas - this is what an export is made of.
+   *
+   * Always on white paper with black ink, whatever the screen is set to. A
+   * board is shared, printed and opened on other people's machines; it must not
+   * carry one person's choice of a dark screen into everybody else's copy. The
+   * dark mapping is switched off around this and put back afterwards rather
+   * than assumed to be off, because an export can happen at any moment.
+   */
   renderTo(box, scale = 2, background = true) {
+    const wasDark = isDarkBoard();
+    setDarkBoard(false);
+    try { return this._renderTo(box, scale, background); }
+    finally { setDarkBoard(wasDark); }
+  }
+
+  _renderTo(box, scale = 2, background = true) {
     const c = document.createElement('canvas');
     c.width = Math.max(1, Math.round(box.w * scale));
     c.height = Math.max(1, Math.round(box.h * scale));

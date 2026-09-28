@@ -2,6 +2,7 @@
 
 import { uid } from './core/util.js';
 import { drawObject } from './core/render.js';
+import { t } from './i18n.js';
 
 const T = (text, x, y, w, size = 34, align = 'left') => ({
   id: uid('t'), type: 'text', x, y, w, h: size * 1.5, text, fontSize: size,
@@ -57,52 +58,52 @@ const PAGE = (id, paper, orientation, name) => ({
 });
 
 export const TEMPLATES = [
-  PAGE('page-infinite', 'infinite', 'portrait', 'Infinite canvas'),
-  PAGE('page-a4-l', 'a4', 'landscape', 'A4 landscape'),
-  PAGE('page-a4-p', 'a4', 'portrait', 'A4 portrait'),
-  PAGE('page-letter-l', 'letter', 'landscape', 'Letter landscape'),
-  PAGE('page-letter-p', 'letter', 'portrait', 'Letter portrait'),
-  PAGE('page-a3-l', 'a3', 'landscape', 'A3 landscape'),
+  PAGE('page-infinite', 'infinite', 'portrait', t('Infinite canvas')),
+  PAGE('page-a4-l', 'a4', 'landscape', t('A4 landscape')),
+  PAGE('page-a4-p', 'a4', 'portrait', t('A4 portrait')),
+  PAGE('page-letter-l', 'letter', 'landscape', t('Letter landscape')),
+  PAGE('page-letter-p', 'letter', 'portrait', t('Letter portrait')),
+  PAGE('page-a3-l', 'a3', 'landscape', t('A3 landscape')),
   {
-    id: 'blank', name: 'Blank board', group: 'General',
+    id: 'blank', name: t('Blank board'), group: t('General'),
     build: () => []
   },
   {
-    id: 'brainstorm', name: 'Brainstorm', group: 'General',
+    id: 'brainstorm', name: t('Brainstorm'), group: t('General'),
     build: () => [
-      T('Brainstorm', -700, -360, 700, 44),
-      Body('Add a sticky note for every idea. No idea is a bad idea — group them later.', -700, -300, 700, 18),
-      ...columns(['Ideas', 'Promising', 'Next steps'], PALETTE),
+      T(t('Brainstorm'), -700, -360, 700, 44),
+      Body(t('Add a sticky note for every idea. No idea is a bad idea — group them later.'), -700, -300, 700, 18),
+      ...columns([t('Ideas'), t('Promising'), t('Next steps')], PALETTE),
       Note(-660, -160, '', '#ffd94a'), Note(-480, -160, '', '#ffd94a'),
       Note(-296, -160, '', '#a4e7a0'), Note(68, -160, '', '#9ad9f5')
     ]
   },
   {
-    id: 'swot', name: 'SWOT analysis', group: 'Strategy',
+    id: 'swot', name: t('SWOT analysis'), group: t('Strategy'),
     build: () => [
-      T('SWOT analysis', -620, -450, 700, 44),
-      ...quadrants(['Strengths', 'Weaknesses', 'Opportunities', 'Threats'], ['#498205', '#ca5010', '#0078d4', '#a4262c'])
+      T(t('SWOT analysis'), -620, -450, 700, 44),
+      ...quadrants([t('Strengths'), t('Weaknesses'), t('Opportunities'), t('Threats')], ['#498205', '#ca5010', '#0078d4', '#a4262c'])
     ]
   },
   {
-    id: 'kanban', name: 'Kanban board', group: 'Project',
+    id: 'kanban', name: t('Kanban board'), group: t('Project'),
     build: () => [
-      T('Kanban board', -760, -340, 700, 44),
-      ...columns(['Backlog', 'In progress', 'Review', 'Done'], PALETTE, { x: -760, w: 300, gap: 20 })
+      T(t('Kanban board'), -760, -340, 700, 44),
+      ...columns([t('Backlog'), t('In progress'), t('Review'), t('Done')], PALETTE, { x: -760, w: 300, gap: 20 })
     ]
   },
   {
-    id: 'retro', name: 'Retrospective', group: 'Team',
+    id: 'retro', name: t('Retrospective'), group: t('Team'),
     build: () => [
-      T('Sprint retrospective', -700, -340, 700, 44),
-      ...columns(['Start doing', 'Stop doing', 'Continue doing'], ['#498205', '#a4262c', '#0078d4'])
+      T(t('Sprint retrospective'), -700, -340, 700, 44),
+      ...columns([t('Start doing'), t('Stop doing'), t('Continue doing')], ['#498205', '#a4262c', '#0078d4'])
     ]
   },
   {
-    id: 'project', name: 'Project planning', group: 'Project',
+    id: 'project', name: t('Project planning'), group: t('Project'),
     build: () => {
-      const out = [T('Project plan', -760, -360, 700, 44)];
-      const weeks = ['Week 1', 'Week 2', 'Week 3', 'Week 4', 'Week 5'];
+      const out = [T(t('Project plan'), -760, -360, 700, 44)];
+      const weeks = [t('Week 1'), t('Week 2'), t('Week 3'), t('Week 4'), t('Week 5')];
       weeks.forEach((w, i) => {
         const x = -760 + i * 300;
         out.push(Box(x, -280, 280, 90, { fill: PALETTE[i % PALETTE.length], stroke: 'none', text: w, textColor: '#fff', fontSize: 26 }));
@@ -112,40 +113,40 @@ export const TEMPLATES = [
     }
   },
   {
-    id: 'meeting', name: 'Effective meeting', group: 'Team',
+    id: 'meeting', name: t('Effective meeting'), group: t('Team'),
     build: () => [
-      T('Meeting', -640, -400, 700, 44),
+      T(t('Meeting'), -640, -400, 700, 44),
       Box(-640, -330, 620, 200, { fill: '#ffffff', stroke: '#e1dfdd' }),
-      Head(-640, -330, 620, 50, 'Agenda', '#6264a7'),
+      Head(-640, -330, 620, 50, t('Agenda'), '#6264a7'),
       Box(-640, -110, 620, 260, { fill: '#ffffff', stroke: '#e1dfdd' }),
-      Head(-640, -110, 620, 50, 'Notes', '#0078d4'),
+      Head(-640, -110, 620, 50, t('Notes'), '#0078d4'),
       Box(20, -330, 620, 200, { fill: '#ffffff', stroke: '#e1dfdd' }),
-      Head(20, -330, 620, 50, 'Decisions', '#038387'),
+      Head(20, -330, 620, 50, t('Decisions'), '#038387'),
       Box(20, -110, 620, 260, { fill: '#ffffff', stroke: '#e1dfdd' }),
-      Head(20, -110, 620, 50, 'Action items', '#ca5010')
+      Head(20, -110, 620, 50, t('Action items'), '#ca5010')
     ]
   },
   {
-    id: 'kwl', name: 'KWL chart', group: 'Learning',
+    id: 'kwl', name: t('KWL chart'), group: t('Learning'),
     build: () => [
-      T('KWL chart', -700, -340, 700, 44),
-      ...columns(['What I Know', 'What I Want to know', 'What I Learned'], ['#0078d4', '#8764b8', '#498205'])
+      T(t('KWL chart'), -700, -340, 700, 44),
+      ...columns([t('What I Know'), t('What I Want to know'), t('What I Learned')], ['#0078d4', '#8764b8', '#498205'])
     ]
   },
   {
-    id: 'frayer', name: 'Frayer model', group: 'Learning',
+    id: 'frayer', name: t('Frayer model'), group: t('Learning'),
     build: () => [
-      ...quadrants(['Definition', 'Characteristics', 'Examples', 'Non-examples'], PALETTE),
-      Box(-190, -100, 180, 180, { kind: 'ellipse', fill: '#6264a7', stroke: '#ffffff', lineWidth: 6, text: 'Concept', textColor: '#fff', fontSize: 24 })
+      ...quadrants([t('Definition'), t('Characteristics'), t('Examples'), t('Non-examples')], PALETTE),
+      Box(-190, -100, 180, 180, { kind: 'ellipse', fill: '#6264a7', stroke: '#ffffff', lineWidth: 6, text: t('Concept'), textColor: '#fff', fontSize: 24 })
     ]
   },
   {
-    id: 'mindmap', name: 'Mind map', group: 'General',
+    id: 'mindmap', name: t('Mind map'), group: t('General'),
     build: () => {
-      const out = [Box(-130, -70, 260, 140, { kind: 'ellipse', fill: '#6264a7', stroke: 'none', text: 'Main idea', textColor: '#fff', fontSize: 26 })];
+      const out = [Box(-130, -70, 260, 140, { kind: 'ellipse', fill: '#6264a7', stroke: 'none', text: t('Main idea'), textColor: '#fff', fontSize: 26 })];
       const spokes = [[-520, -300], [200, -300], [-520, 190], [200, 190], [-620, -60], [420, -60]];
       spokes.forEach(([x, y], i) => {
-        out.push(Box(x, y, 220, 110, { kind: 'roundRect', fill: '#ffffff', stroke: PALETTE[i % PALETTE.length], lineWidth: 3, text: 'Idea ' + (i + 1), fontSize: 20 }));
+        out.push(Box(x, y, 220, 110, { kind: 'roundRect', fill: '#ffffff', stroke: PALETTE[i % PALETTE.length], lineWidth: 3, text: t('Idea {n}', { n: i + 1 }), fontSize: 20 }));
         out.push({
           id: uid('sh'), type: 'shape', kind: 'line', rotation: 0, stroke: '#a19f9d', lineWidth: 2, fill: 'none',
           x: x + 110, y: y + 55, w: 0 - (x + 110), h: 0 - (y + 55)
@@ -155,41 +156,41 @@ export const TEMPLATES = [
     }
   },
   {
-    id: 'decision', name: 'Decision matrix', group: 'Strategy',
+    id: 'decision', name: t('Decision matrix'), group: t('Strategy'),
     build: () => [
-      T('Decision matrix', -560, -340, 700, 44),
+      T(t('Decision matrix'), -560, -340, 700, 44),
       {
         id: uid('tb'), type: 'table', x: -560, y: -270, w: 1120, h: 500, rows: 5, cols: 5, rotation: 0,
         stroke: '#605e5c', fill: '#ffffff', lineWidth: 2, headerRow: true, headerColor: '#eceafb',
-        cells: { '0,0': 'Option', '0,1': 'Cost', '0,2': 'Impact', '0,3': 'Effort', '0,4': 'Score' }
+        cells: { '0,0': t('Option'), '0,1': t('Cost'), '0,2': t('Impact'), '0,3': t('Effort'), '0,4': t('Score') }
       }
     ]
   },
   {
-    id: 'weekly', name: 'Weekly planner', group: 'Project',
+    id: 'weekly', name: t('Weekly planner'), group: t('Project'),
     build: () => [
-      T('Weekly planner', -840, -330, 700, 44),
-      ...columns(['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'], PALETTE, { x: -840, w: 320, gap: 16, y: -260, h: 560 })
+      T(t('Weekly planner'), -840, -330, 700, 44),
+      ...columns([t('Monday'), t('Tuesday'), t('Wednesday'), t('Thursday'), t('Friday')], PALETTE, { x: -840, w: 320, gap: 16, y: -260, h: 560 })
     ]
   },
   {
-    id: 'empathy', name: 'Empathy map', group: 'Strategy',
+    id: 'empathy', name: t('Empathy map'), group: t('Strategy'),
     build: () => [
-      ...quadrants(['Says', 'Thinks', 'Does', 'Feels'], ['#0078d4', '#8764b8', '#498205', '#ca5010']),
-      Box(-150, -120, 300, 200, { kind: 'ellipse', fill: '#ffffff', stroke: '#6264a7', lineWidth: 4, text: 'Who?', fontSize: 28 })
+      ...quadrants([t('Says'), t('Thinks'), t('Does'), t('Feels')], ['#0078d4', '#8764b8', '#498205', '#ca5010']),
+      Box(-150, -120, 300, 200, { kind: 'ellipse', fill: '#ffffff', stroke: '#6264a7', lineWidth: 4, text: t('Who?'), fontSize: 28 })
     ]
   },
   {
-    id: 'flow', name: 'Flowchart starter', group: 'General',
+    id: 'flow', name: t('Flowchart starter'), group: t('General'),
     build: () => {
       const out = [];
       const nodes = [
-        ['Start', 'ellipse', -140, -420, 280, 100, '#6264a7'],
-        ['Step', 'roundRect', -140, -250, 280, 110, '#0078d4'],
-        ['Decision?', 'diamond', -170, -80, 340, 190, '#ca5010'],
-        ['Yes path', 'roundRect', 260, -30, 260, 110, '#498205'],
-        ['No path', 'roundRect', -520, -30, 260, 110, '#a4262c'],
-        ['End', 'ellipse', -140, 160, 280, 100, '#323130']
+        [t('Start'), 'ellipse', -140, -420, 280, 100, '#6264a7'],
+        [t('Step'), 'roundRect', -140, -250, 280, 110, '#0078d4'],
+        [t('Decision?'), 'diamond', -170, -80, 340, 190, '#ca5010'],
+        [t('Yes path'), 'roundRect', 260, -30, 260, 110, '#498205'],
+        [t('No path'), 'roundRect', -520, -30, 260, 110, '#a4262c'],
+        [t('End'), 'ellipse', -140, 160, 280, 100, '#323130']
       ];
       for (const [text, kind, x, y, w, h, color] of nodes)
         out.push(Box(x, y, w, h, { kind, fill: '#ffffff', stroke: color, lineWidth: 3, text, fontSize: 22 }));

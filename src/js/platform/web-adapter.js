@@ -12,6 +12,7 @@ storage.setLocalBackend(indexedDbStorage);
 import * as files from './web-files.js';
 import { generatePdfFromHtml } from './web-pdf.js';
 import * as updater from './update-manager.js';
+import { t } from '../i18n.js';
 
 const APP_VERSION = '__APP_VERSION__';
 updater.setAppVersion(APP_VERSION);
@@ -52,7 +53,7 @@ export function createWebAdapter() {
         electron: null,
         chrome: chromeMatch ? chromeMatch[1] : 'Web',
         libreoffice: false,
-        userData: 'Browser Storage (IndexedDB)',
+        userData: t('Browser Storage (IndexedDB)'),
         smoke: false,
         isWeb: true,
         pwa: typeof window !== 'undefined' && (
@@ -75,6 +76,17 @@ export function createWebAdapter() {
       return Promise.resolve(true);
     },
     checkForUpdate: () => updater.checkForUpdate(),
+    // A browser will only hand over the clipboard with permission, and may
+    // simply refuse. An empty description is the honest answer to that, and
+    // leaves paste falling back to the board's own copy.
+    clipboardRead: async () => {
+      try {
+        const text = (await navigator.clipboard?.readText?.()) || '';
+        return { text, image: null, signature: text ? `text/plain\u0000${text}` : '' };
+      } catch {
+        return { text: '', image: null, signature: null };
+      }
+    },
 
     boards: {
       list: () => storage.listBoards(),
@@ -106,10 +118,10 @@ export function createWebAdapter() {
         // For other formats in web runtime, advise user
         return {
           ok: false,
-          error: `Web runtime directly imports PDF and image files. For ${ext.toUpperCase()} documents, please export to PDF first.`
+          error: t('Web runtime directly imports PDF and image files. For {ext} documents, please export to PDF first.', { ext: ext.toUpperCase() })
         };
       } catch (e) {
-        return { ok: false, error: e.message || 'Could not import file' };
+        return { ok: false, error: e.message || t('Could not import file') };
       }
     },
 

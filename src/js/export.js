@@ -4,7 +4,8 @@ import { worldBounds } from './core/store.js';
 import { pageRects } from './core/pages.js';
 import { wrapText } from './core/util.js';
 import { layoutPages } from './ui/pdfdialog.js';
-import { FONT, faceOf } from './core/render.js';
+import { FONT, faceOf, CURTAIN_COLOR } from './core/render.js';
+import { t } from './i18n.js';
 
 /**
  * What a bitmap or vector export covers.
@@ -44,13 +45,13 @@ export async function exportPng(app, { scale = 2, transparent = false, selection
   const buf = await blob.arrayBuffer();
 
   const filePath = await window.board.saveDialog({
-    title: 'Export as PNG',
+    title: t('Export as PNG'),
     defaultPath: safeName(app.store.doc.name) + '.png',
-    filters: [{ name: 'PNG image', extensions: ['png'] }]
+    filters: [{ name: t('PNG image'), extensions: ['png'] }]
   });
   if (!filePath) return null;
   await window.board.writeFile(filePath, buf);
-  app.toast('Exported ' + filePath.split(/[\\/]/).pop());
+  app.toast(t('Exported {name}', { name: filePath.split(/[\\/]/).pop() }));
   return filePath;
 }
 
@@ -103,13 +104,13 @@ export async function exportSvg(app) {
   const box = exportBounds(app);
   const svg = buildSvg(app, box);
   const filePath = await window.board.saveDialog({
-    title: 'Export as SVG',
+    title: t('Export as SVG'),
     defaultPath: safeName(app.store.doc.name) + '.svg',
-    filters: [{ name: 'SVG image', extensions: ['svg'] }]
+    filters: [{ name: t('SVG image'), extensions: ['svg'] }]
   });
   if (!filePath) return null;
   await window.board.writeFile(filePath, new TextEncoder().encode(svg).buffer);
-  app.toast('Exported ' + filePath.split(/[\\/]/).pop());
+  app.toast(t('Exported {name}', { name: filePath.split(/[\\/]/).pop() }));
   return filePath;
 }
 
@@ -124,6 +125,7 @@ function buildSvg(app, box) {
   const meas = document.createElement('canvas').getContext('2d');
 
   for (const o of app.store.objects) {
+    if (o.hidden) continue;       // written on a cover that has been lifted
     const b = worldBounds(o);
     const rot = o.rotation ? ` transform="rotate(${(o.rotation * 180) / Math.PI} ${b.x + b.w / 2} ${b.y + b.h / 2})"` : '';
     if (o.type === 'stroke') {
@@ -138,8 +140,23 @@ function buildSvg(app, box) {
       if (o.text) parts.push(textSvg(meas, o.text, o.x + 14, o.y + 14, o.w - 28, o.h - 28, { align: o.align || 'center', valign: 'middle', color: o.textColor || '#201f1e', size: o.fontSize || 22 }, rot));
     } else if (o.type === 'text') {
       parts.push(textSvg(meas, o.text, o.x, o.y, o.w, o.h, { align: o.align || 'left', valign: 'top', color: o.color, size: o.fontSize || 24, font: o.font }, rot));
+    } else if (o.type === 'emoji') {
+      /*
+       * An emoji goes out as the character itself, not as a picture of it.
+       * Whoever opens the SVG sees it in their own emoji font, which is the
+       * same bargain the board makes on screen; a viewer with no emoji font
+       * at all gets a placeholder box, and there is nothing to be done about
+       * that short of embedding a font in every export.
+       */
+      const size = Math.min(o.w, o.h);
+      parts.push(`<text x="${o.x + o.w / 2}" y="${o.y + o.h / 2}" font-size="${size}" text-anchor="middle" dominant-baseline="central" font-family="Apple Color Emoji, Segoe UI Emoji, Noto Color Emoji, sans-serif"${rot}>${esc(o.ch || '')}</text>`);
     } else if (o.type === 'image') {
       parts.push(`<image x="${o.x}" y="${o.y}" width="${o.w}" height="${o.h}" href="${o.src}" preserveAspectRatio="none"${rot}/>`);
+    } else if (o.type === 'curtain') {
+      // a lifted cover is not on the board, so it is not in the picture either
+      if (!o.revealed) {
+        parts.push(`<rect x="${o.x}" y="${o.y}" width="${o.w}" height="${o.h}" rx="${Math.min(14, Math.abs(o.w) / 6, Math.abs(o.h) / 6)}" fill="${o.color || CURTAIN_COLOR}"${rot}/>`);
+      }
     } else if (o.type === 'table') {
       const cw = o.w / o.cols, ch = o.h / o.rows;
       parts.push(`<g${rot}><rect x="${o.x}" y="${o.y}" width="${o.w}" height="${o.h}" fill="${o.fill || '#fff'}"/>`);
@@ -221,17 +238,17 @@ export async function exportPdf(app, opts) {
   const box = exportBounds(app, 40);
   const L = layoutPages(box, opts);
   const sheets = L.cols * L.rows;
-  if (sheets > 200) { app.toast('That is over 200 pages — try a bigger page size'); return null; }
+  if (sheets > 200) { app.toast(t('That is over 200 pages — try a bigger page size')); return null; }
 
   // opts.filePath lets the test suite run this end to end without a native dialog
   const filePath = opts.filePath || await window.board.saveDialog({
-    title: 'Export as PDF',
+    title: t('Export as PDF'),
     defaultPath: safeName(app.store.doc.name) + '.pdf',
-    filters: [{ name: 'PDF document', extensions: ['pdf'] }]
+    filters: [{ name: t('PDF document'), extensions: ['pdf'] }]
   });
   if (!filePath) return null;
 
-  const progress = app.showProgress('Exporting PDF', sheets > 1 ? `0 of ${sheets} pages` : 'Rendering…');
+  const progress = app.showProgress(t('Exporting PDF'), sheets > 1 ? t('{n} of {total} pages', { n: 0, total: sheets }) : t('Rendering…'));
   try {
     const pages = [];
     for (let r = 0; r < L.rows; r++) {
@@ -253,24 +270,26 @@ export async function exportPdf(app, opts) {
           hMm: tile.h * MM_PER_PX * (L.scale ?? 1)
         });
         const n = pages.length;
-        progress.update(n / sheets, sheets > 1 ? `${n} of ${sheets} pages` : 'Rendering…');
+        progress.update(n / sheets, sheets > 1 ? t('{n} of {total} pages', { n, total: sheets }) : t('Rendering…'));
         await new Promise((r2) => setTimeout(r2, 0));       // let the UI breathe
       }
     }
 
-    progress.update(0.95, 'Writing the PDF…');
+    progress.update(0.95, t('Writing the PDF…'));
     const html = pdfHtml(pages, L);
     const res = await window.board.exportPdf({
       html, widthIn: L.pageW / 25.4, heightIn: L.pageH / 25.4
     });
-    if (!res.ok) { progress.close(); app.toast(res.error || 'PDF export failed'); return null; }
+    if (!res.ok) { progress.close(); app.toast(res.error || t('PDF export failed')); return null; }
     await window.board.writeFile(filePath, res.data);
     progress.close();
-    app.toast(`Exported ${filePath.split(/[\\/]/).pop()} — ${sheets} page${sheets === 1 ? '' : 's'}`);
+    app.toast(sheets === 1
+      ? t('Exported {name} — {n} page', { name: filePath.split(/[\\/]/).pop(), n: sheets })
+      : t('Exported {name} — {n} pages', { name: filePath.split(/[\\/]/).pop(), n: sheets }));
     return filePath;
   } catch (e) {
     progress.close();
-    app.toast('PDF export failed: ' + e.message);
+    app.toast(t('PDF export failed: {error}', { error: e.message }));
     return null;
   }
 }
@@ -278,14 +297,14 @@ export async function exportPdf(app, opts) {
 /** Every sheet of the pad, in order, as the pages of one PDF. */
 async function exportPadPdf(app, opts, rects) {
   const filePath = opts.filePath || await window.board.saveDialog({
-    title: 'Export as PDF',
+    title: t('Export as PDF'),
     defaultPath: safeName(app.store.doc.name) + '.pdf',
-    filters: [{ name: 'PDF document', extensions: ['pdf'] }]
+    filters: [{ name: t('PDF document'), extensions: ['pdf'] }]
   });
   if (!filePath) return null;
 
   const n = rects.length;
-  const progress = app.showProgress('Exporting PDF', n > 1 ? `0 of ${n} pages` : 'Rendering…');
+  const progress = app.showProgress(t('Exporting PDF'), n > 1 ? t('{n} of {total} pages', { n: 0, total: n }) : t('Rendering…'));
   try {
     const first = rects[0];
     const pages = [];
@@ -296,22 +315,24 @@ async function exportPadPdf(app, opts, rects) {
       const q = longest * want > 10000 ? 10000 / longest : want;
       const canvas = app.surface.renderTo(r, q, true);
       pages.push({ src: canvas.toDataURL('image/png'), wMm: r.w * MM_PER_PX, hMm: r.h * MM_PER_PX });
-      progress.update((i + 1) / n, n > 1 ? `${i + 1} of ${n} pages` : 'Rendering…');
+      progress.update((i + 1) / n, n > 1 ? t('{n} of {total} pages', { n: i + 1, total: n }) : t('Rendering…'));
       await new Promise((r2) => setTimeout(r2, 0));         // let the UI breathe
     }
 
-    progress.update(0.95, 'Writing the PDF…');
+    progress.update(0.95, t('Writing the PDF…'));
     const pageW = first.w * MM_PER_PX, pageH = first.h * MM_PER_PX;
     const L = { pageW, pageH, innerW: pageW, innerH: pageH, margin: 0 };
     const res = await window.board.exportPdf({ html: pdfHtml(pages, L), widthIn: pageW / 25.4, heightIn: pageH / 25.4 });
-    if (!res.ok) { progress.close(); app.toast(res.error || 'PDF export failed'); return null; }
+    if (!res.ok) { progress.close(); app.toast(res.error || t('PDF export failed')); return null; }
     await window.board.writeFile(filePath, res.data);
     progress.close();
-    app.toast(`Exported ${filePath.split(/[\\/]/).pop()} — ${n} page${n === 1 ? '' : 's'}`);
+    app.toast(n === 1
+      ? t('Exported {name} — {n} page', { name: filePath.split(/[\\/]/).pop(), n })
+      : t('Exported {name} — {n} pages', { name: filePath.split(/[\\/]/).pop(), n }));
     return filePath;
   } catch (e) {
     progress.close();
-    app.toast('PDF export failed: ' + e.message);
+    app.toast(t('PDF export failed: {error}', { error: e.message }));
     return null;
   }
 }
@@ -367,22 +388,22 @@ export function exportable(doc) {
 
 export async function saveBoardFile(app) {
   const filePath = await window.board.saveDialog({
-    title: 'Save a copy',
+    title: t('Save a copy'),
     defaultPath: safeName(app.store.doc.name) + '.gazboard',
-    filters: [{ name: 'GazBoard file', extensions: ['gazboard'] }, { name: 'JSON', extensions: ['json'] }]
+    filters: [{ name: t('GazBoard file'), extensions: ['gazboard'] }, { name: 'JSON', extensions: ['json'] }]
   });
   if (!filePath) return null;
   const json = JSON.stringify(exportable(app.store.toJSON({ app: 'GazBoard', version: 1 })), null, 0);
   await window.board.writeFile(filePath, new TextEncoder().encode(json).buffer);
-  app.toast('Saved ' + filePath.split(/[\\/]/).pop());
+  app.toast(t('Saved {name}', { name: filePath.split(/[\\/]/).pop() }));
   return filePath;
 }
 
 export async function openBoardFile(app) {
   const paths = await window.board.openDialog({
-    title: 'Open a board',
+    title: t('Open a board'),
     properties: ['openFile'],
-    filters: [{ name: 'GazBoard file', extensions: ['gazboard', 'openboard', 'json'] }]
+    filters: [{ name: t('GazBoard file'), extensions: ['gazboard', 'openboard', 'json'] }]
   });
   if (!paths.length) return;
   const buf = await window.board.readFile(paths[0]);
@@ -393,7 +414,7 @@ export async function openBoardFile(app) {
   try { origin = (await window.board.fileOrigin?.(paths[0])) || paths[0]; } catch { /* keep the path */ }
   data.origin = origin;
   await app.loadBoard(data, { asCopy: false });
-  app.toast('Opened ' + (data.name || 'board'));
+  app.toast(t('Opened {name}', { name: data.name || t('board') }));
 }
 
 export const safeName = (n) => String(n || 'board').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 80).trim() || 'board';

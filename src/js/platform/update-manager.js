@@ -2,6 +2,7 @@
 // Automatically and safely discovers new deployments and coordinates atomic updates.
 
 import { isNewer } from '../core/version.js';
+import { t } from '../i18n.js';
 
 let _currentVersion = null;
 let _updateAvailable = false;
@@ -40,7 +41,7 @@ function notifyUpdate(version) {
 /** Check whether a newer version has been deployed. */
 export async function checkForUpdate(opts = {}) {
   if (!navigator.onLine) {
-    return { ok: false, error: 'No connection' };
+    return { ok: false, error: t('No connection') };
   }
 
   // 1. Trigger Service Worker update check
@@ -70,9 +71,9 @@ export async function checkForUpdate(opts = {}) {
     });
     clearTimeout(timer);
 
-    if (!res.ok) return { ok: false, error: `Server replied ${res.status}` };
+    if (!res.ok) return { ok: false, error: t('Server replied {status}', { status: res.status }) };
     const meta = await res.json();
-    if (!meta || !meta.version) return { ok: false, error: 'Invalid version manifest' };
+    if (!meta || !meta.version) return { ok: false, error: t('Invalid version manifest') };
 
     const remoteVer = meta.version;
     const currentVer = _currentVersion || '0.0.0';
@@ -103,7 +104,7 @@ export async function checkForUpdate(opts = {}) {
   } catch (e) {
     return {
       ok: false,
-      error: e.name === 'AbortError' ? 'The check timed out' : 'No connection'
+      error: e.name === 'AbortError' ? t('The check timed out') : t('No connection')
     };
   }
 }

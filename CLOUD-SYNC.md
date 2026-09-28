@@ -89,3 +89,24 @@ tables in the same project:
 Blank out `CLOUD_URL` / `CLOUD_KEY` in `src/js/cloud/config.js`. Every code
 path checks `cloudConfigured()` first, so the app falls back to upstream
 behaviour: local only, no pill, no network.
+
+## Merging upstream
+
+Last merged: upstream 3.0.0 (teaching kit, translations, Android host), on
+2026-09-28. Things worth knowing next time:
+
+- **Upstream's smoke suite fails ~50 checks here, on purpose.** Its tests
+  assume a new board is an infinite canvas at 100%. This fork starts new
+  boards on an A4 sheet fitted to the window (`defaultPaper`), and remembers
+  the last page size chosen (`setPageSize` writes `defaultPaper`). Set both
+  back to infinite and the suite passes in full — that is the check that a
+  merge broke nothing.
+- **Translations:** anything wrapped in `t()`, and every `title` in
+  `index.html`, must have an entry in all six `src/locales/*.json` files or the
+  smoke suite's translation check fails.
+- **Android native app** (`android-adapter.js`) is not wired to the cloud
+  layer — it stays local-only. Phones sync through the web/PWA build.
+- **Board list:** upstream's export tick-boxes and this fork's multi-delete
+  share one selection — Export and Delete sit side by side.
+- **New boards:** this fork's A4 default applies first; upstream's opt-in
+  "Use this canvas for new boards" switch overrides it when turned on.

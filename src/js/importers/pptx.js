@@ -5,6 +5,8 @@
 // then prints to PDF and the board rasterises. Fidelity is "readable", not
 // pixel-perfect - shapes, text, pictures, tables and basic formatting.
 
+import { t } from '../i18n.js';
+
 const R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const relId = (el) => (el ? el.getAttributeNS(R_NS, 'embed') || el.getAttributeNS(R_NS, 'id') || el.getAttribute('r:embed') || el.getAttribute('r:id') : null);
 
@@ -214,7 +216,7 @@ export async function pptxToSlides(arrayBuffer) {
   const zip = await JSZip.loadAsync(arrayBuffer);
 
   const presFile = zip.file('ppt/presentation.xml');
-  if (!presFile) throw new Error('Not a PowerPoint file (ppt/presentation.xml missing)');
+  if (!presFile) throw new Error(t('Not a PowerPoint file (ppt/presentation.xml missing)'));
   const pres = new DOMParser().parseFromString(await presFile.async('string'), 'application/xml');
   const sz = nsFirst(pres, 'sldSz');
   const widthPx = px(sz?.getAttribute('cx') || 12192000);
@@ -246,6 +248,6 @@ export async function pptxToSlides(arrayBuffer) {
     }
     slides.push(`<section class="slide" style="background:${bgFill}">${out.join('')}</section>`);
   }
-  if (!slides.length) throw new Error('No slides found in this presentation');
+  if (!slides.length) throw new Error(t('No slides found in this presentation'));
   return { widthPx, heightPx, slides };
 }

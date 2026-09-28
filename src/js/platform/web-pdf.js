@@ -1,6 +1,8 @@
 // Client-side PDF generator for the Web/PWA runtime.
 // Converts canvas-rendered page bitmaps into a valid, standard PDF 1.4 document.
 
+import { t } from '../i18n.js';
+
 const MM_TO_PT = 72 / 25.4;
 
 function loadImage(src) {
@@ -10,7 +12,7 @@ function loadImage(src) {
       img.crossOrigin = 'anonymous';
     }
     img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('Failed to load page image'));
+    img.onerror = () => reject(new Error(t('Failed to load page image')));
     img.src = src;
   });
 }
@@ -116,7 +118,7 @@ export async function generatePdfFromHtml(payload) {
     }
 
     if (!rawItems.length) {
-      return { ok: false, error: 'No printable content found' };
+      return { ok: false, error: t('No printable content found') };
     }
 
     const pageItems = [];
@@ -241,6 +243,6 @@ export async function generatePdfFromHtml(payload) {
     return { ok: true, data: finalBuf.buffer };
   } catch (e) {
     console.warn('[pdf] generatePdfFromHtml error:', e);
-    return { ok: false, error: e.message || 'PDF generation failed' };
+    return { ok: false, error: e.message || t('PDF generation failed') };
   }
 }

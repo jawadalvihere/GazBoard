@@ -283,14 +283,30 @@ async function run(win, app) {
   // should arrive is known it is named, so a stale reading can never satisfy
   // the wait; where it is not (maximise depends on the screen), the width has
   // to hold still for three consecutive reads after a settling pause.
-  const settle = async (label, expectW) => {
+  /*
+   * The wait used to name the width it expected - 1500 after setSize(1500).
+   * That is only true at 100% display scaling. On a laptop at 156% the window
+   * is 1500 device-ish pixels and the canvas inside it is 1486 CSS ones, so the
+   * named width never arrived, the poll span its full three seconds, and the
+   * check reported whatever half-resized frame it happened to end on. It
+   * passed on a rerun, which is the worst way for a test to fail: it teaches
+   * you to rerun instead of to look.
+   *
+   * What is actually known is not the number, it is that the width must MOVE
+   * off the one it had before, then hold still. That is true at any scaling.
+   */
+  const settle = async (label, changedFrom) => {
     await sleep(250);
     let s = await fits(label), last = -1, held = 0;
     for (let i = 0; i < 60; i++) {
       held = s.w === last ? held + 1 : 0;
       last = s.w;
-      const right = expectW === undefined ? held >= 2 : s.w === expectW;
-      if (right && s.elementFillsStage && s.bufferMatches && s.surfaceW === s.w) return s;
+      const ok = s.elementFillsStage && s.bufferMatches && s.surfaceW === s.w;
+      const moved = changedFrom === undefined || s.w !== changedFrom;
+      // Held still and moved off the old width. A resize that genuinely lands
+      // on the same width - already maximised, say - is let through once it
+      // has been steady a good while, rather than spinning out the full wait.
+      if (ok && held >= 2 && (moved || held >= 8)) return s;
       await sleep(50);
       s = await fits(label);
     }
@@ -298,15 +314,16 @@ async function run(win, app) {
   };
 
   const sizes = [];
+  const wasW = () => sizes[sizes.length - 1].w;
   sizes.push(await settle('initial'));
-  win.setSize(1100, 780); sizes.push(await settle('shrunk', 1100));
-  win.setSize(1500, 950); sizes.push(await settle('grown', 1500));
-  win.maximize(); sizes.push(await settle('maximised'));
-  win.unmaximize(); sizes.push(await settle('restored', 1500));
+  win.setSize(1100, 780); sizes.push(await settle('shrunk', wasW()));
+  win.setSize(1500, 950); sizes.push(await settle('grown', wasW()));
+  win.maximize(); sizes.push(await settle('maximised', wasW()));
+  win.unmaximize(); sizes.push(await settle('restored', wasW()));
   // a zoom-factor change moves devicePixelRatio without any window resize -
   // the same shape as a Windows display-scaling change
-  win.webContents.setZoomFactor(1.25); sizes.push(await settle('dpr 1.25', 1200));
-  win.webContents.setZoomFactor(1); sizes.push(await settle('dpr back', 1500));
+  win.webContents.setZoomFactor(1.25); sizes.push(await settle('dpr 1.25', wasW()));
+  win.webContents.setZoomFactor(1); sizes.push(await settle('dpr back', wasW()));
   win.setSize(1440, 900); await sleep(400);
 
   const bad = sizes.filter((s) => !s.elementFillsStage || !s.bufferMatches);
@@ -786,7 +803,7 @@ async function run(win, app) {
   check('clicking empty canvas deselects', misc.selBefore === 1 && misc.selAfterSelect === 0);
   check('panning with an ink tool deselects too', misc.selAfterPan === 0);
   check('zooming shows a readout', misc.pillShown && /%/.test(misc.pillText), misc.pillText);
-  check('there is a handwriting font, and it is Comic Sans first',
+  check('the comic face is there, reaches for Comic Sans, and reaches the renderer',
     misc.fonts.includes('hand') && misc.comic && misc.resolved, misc.fonts.join(', '));
 
   /* ---- text comes out handwritten without anyone choosing it ---- */
@@ -842,8 +859,17 @@ async function run(win, app) {
     `${faces.upgradedText} / ${faces.upgradedNote}`);
   check('but a deliberate choice of the sans face is left alone',
     faces.chosenText === 'ui', faces.chosenText);
-  check('the handwriting face reaches for Comic Sans before anything else',
-    /^'Comic Sans MS'/.test(faces.handFace), faces.handFace);
+  /*
+   * The comic face - id 'hand', labelled Marker in the picker - is the Comic
+   * Sans look the original Whiteboard had. It leads with Comic Neue, bundled:
+   * drawn to be Comic Sans, and the same file on every device. The real Comic
+   * Sans sits straight behind it for an SVG export opened somewhere that has
+   * no copy of ours.
+   */
+  check('the comic face is the Comic Sans look, bundled first and the real one right behind',
+    // the bundled Bangla and Arabic sit between: they only cover their own
+    // scripts, so they change nothing for Latin text
+    /^'GazBoard Comic Neue',('GazBoard Noto [A-Za-z ]+',)*'Comic Sans MS'/.test(faces.handFace), faces.handFace);
   check('the editor types in the face the text will commit to, not just for handwriting',
     faces.editorFace.replace(/"/g, "'").includes('Georgia'), faces.editorFace);
 
@@ -1101,6 +1127,10 @@ async function run(win, app) {
     a.settings.inkPointer = 'nib';
     const penOverInk = hoverAt(250, 300, 'pen');       // stylus hovering its own writing
     const penOverBox = hoverAt(580, 310, 'pen');
+    // Those were pen hovers, so the pen-ghost guard is armed. A person picking
+    // the mouse up clears it by moving; this test is about hover hints, and the
+    // guard has a test of its own.
+    it._penSp = null;
     const mouseOverInk = hoverAt(250, 300, 'mouse');   // mouse: cursor hints, no outline
     const mouseOverEmpty = hoverAt(900, 700, 'mouse');
 
@@ -1113,7 +1143,9 @@ async function run(win, app) {
     a.settings.inkPointer = 'nib';
 
     a.setTool('select');
-    it._penAt = 0;        // the probes above were pen hovers; clear the pen-ghost guard
+    // The probes above were pen hovers, so the pen-ghost guard is armed at the
+    // last one's position. Clearing it is what a person moving the mouse does.
+    it._penSp = null;
     const selectOverInk = hoverAt(250, 300, 'mouse');  // picking tool: outline is useful
 
     a.penSeenThisSession = false; a.store.clear(); sf.hoverId = null; it.inkPointer = null;
@@ -1202,29 +1234,84 @@ async function run(win, app) {
     `${pointer.startedOnEmpty}, ${pointer.panned}px`);
   check('the stylus still inks over an object', pointer.inked === 1);
 
+  /*
+   * One rule for colour, the same for every kind of object: the selection bar
+   * recolours what is selected and nothing else, and a tool's own picker on
+   * the toolbar sets what comes next.
+   *
+   * It used to be that recolouring from the selection bar ALSO became the
+   * colour of the next object of that kind. Fixing the colour of one word
+   * left every later word that colour; recolouring one old stroke swapped
+   * the ink of the pen in your hand. Everything here goes through the real
+   * buttons - the bar's colour button, then a swatch in the popover it opens -
+   * because that is where the old rule lived, not in a function a test could
+   * call around.
+   */
   const colours = await js(`
-    const a = window.app;
+    const a = window.app, s = a.settings;
     const { updateSelectionBar } = await import('app://board/js/ui/contextmenu.js');
-    a.newBoard(true);
+    const { openToolPopover } = await import('app://board/js/ui/toolbar.js');
+    const { closePopover } = await import('app://board/js/ui/popover.js');
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    a.newBoard(true); a.textEditor.cancel(); a.setTool('select');
 
-    // recolour a shape from the selection bar, then make a new one
-    a.store.add({ id: 'c1', type: 'shape', kind: 'rect', x: 0, y: 0, w: 100, h: 100,
-                  rotation: 0, stroke: '#201f1e', fill: 'none', lineWidth: 3 });
-    a.setSelection(['c1']);
-    a.rememberColor('shape', 'stroke', '#e81123');
-    a.store.updateMany(['c1'], { stroke: '#e81123' });
-    const shapeDefault = a.settings.shapeStroke;
+    const defaults = () => ({ note: s.noteColor, text: s.textColor, outline: s.shapeStroke,
+                              fill: s.shapeFill, pen: s.penColor, pens: JSON.stringify(s.pens || {}) });
+    const before = defaults();
 
-    a.rememberColor('note', 'color', '#a4e7a0');
-    const noteDefault = a.settings.noteColor;
-    a.rememberColor('text', 'color', '#0078d4');
-    const textDefault = a.settings.textColor;
-    a.rememberColor('stroke', 'color', '#8764b8');
-    const penDefault = a.settings.penColor;
+    // select one object, open the bar's colour popover, press a swatch that
+    // is neither its current colour nor the default - so a change is visible
+    const recolour = async (obj, key, section = 0) => {
+      a.store.add(obj); a.setSelection([obj.id]); updateSelectionBar(a);
+      await sleep(40);
+      const btn = document.querySelector('#ctxbar .colour-btn');
+      if (!btn) return { picked: null, now: null, why: 'no colour button on the bar' };
+      btn.click(); await sleep(20);
+      const grids = document.querySelectorAll('.pop .swatches');
+      const grid = grids[section];
+      if (!grid) return { picked: null, now: null, why: 'popover had ' + grids.length + ' swatch row(s)' };
+      // a swatch's title is its colour, except the fill row's "none", which is
+      // titled No fill for people - so read the value, not the label
+      const valueOf = (b) => (b.title === 'No fill' ? 'none' : b.title);
+      const avoid = new Set([obj[key], before.note, before.text, before.outline, before.fill, before.pen]);
+      const sw = [...grid.querySelectorAll('.sw')].find((b) => b.title && !avoid.has(valueOf(b)));
+      if (!sw) return { picked: null, now: null, why: 'no distinct swatch to press' };
+      sw.click(); await sleep(20);
+      return { picked: valueOf(sw), now: a.store.get(obj.id)[key] };
+    };
 
-    // a brand new note picks up the remembered colour
-    a.addNoteAt({ x: 400, y: 400 }); a.textEditor.cancel();
-    const newNote = a.store.objects.filter(o => o.type === 'note').pop();
+    const r = {};
+    r.note = await recolour({ id: 'cn', type: 'note', x: 0, y: 0, w: 200, h: 200, color: before.note,
+                              text: 'n', rotation: 0, align: 'center', font: 'hand' }, 'color');
+    r.text = await recolour({ id: 'ct', type: 'text', x: 0, y: 300, w: 300, h: 50, color: before.text, text: 'word',
+                              fontSize: 32, rotation: 0, align: 'left', valign: 'top', font: 'hand', background: 'none' }, 'color');
+    r.outline = await recolour({ id: 'cs', type: 'shape', kind: 'rect', x: 400, y: 0, w: 100, h: 100,
+                                 rotation: 0, stroke: before.outline, fill: 'none', lineWidth: 3 }, 'stroke');
+    a.setSelection([]); a.store.remove(['cs']);
+    r.fill = await recolour({ id: 'cf', type: 'shape', kind: 'rect', x: 400, y: 200, w: 100, h: 100,
+                              rotation: 0, stroke: before.outline, fill: 'none', lineWidth: 3 }, 'fill', 1);
+    r.stroke = await recolour({ id: 'ck', type: 'stroke', tool: 'pen', color: before.pen, width: 4, effect: 'none',
+                                hue: 0, opacity: 1, rotation: 0, bbox: { x: 600, y: 0, w: 60, h: 60 },
+                                points: [{ x: 600, y: 0, p: .5 }, { x: 660, y: 60, p: .5 }] }, 'color');
+    a.setSelection([]); closePopover();
+    r.after = defaults();
+    r.before = before;
+
+    // and the next new note still comes out in the untouched default
+    a.addNoteAt({ x: 900, y: 400 }); a.textEditor.cancel();
+    r.nextNote = a.store.objects.filter((o) => o.type === 'note').pop()?.color;
+
+    // the tool's own picker is still where "what comes next" is set
+    const anchor = document.querySelector('#toolbar button') || document.body;
+    openToolPopover(a, anchor, 'note'); await sleep(20);
+    const toolSw = [...document.querySelectorAll('.pop .swatches .sw')].find((b) => b.title && b.title !== before.note);
+    r.toolPicked = toolSw ? toolSw.title : null;
+    if (toolSw) toolSw.click();
+    await sleep(20); closePopover();
+    r.toolSetDefault = s.noteColor;
+    a.addNoteAt({ x: 1200, y: 400 }); a.textEditor.cancel();
+    r.toolNextNote = a.store.objects.filter((o) => o.type === 'note').pop()?.color;
+    s.noteColor = before.note; a.saveSettings(); a.syncUI();
 
     // an image offers no colour control
     a.store.clear();
@@ -1232,10 +1319,10 @@ async function run(win, app) {
       src: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' });
     a.setSelection(['img']);
     updateSelectionBar(a);
-    await new Promise(r => setTimeout(r, 40));
+    await sleep(40);
     const bar = document.getElementById('ctxbar');
-    const imageButtons = bar.querySelectorAll('button').length;
-    const imageHasSwatch = !!bar.querySelector('.colour-btn');
+    r.imageButtons = bar.querySelectorAll('button').length;
+    r.imageHasSwatch = !!bar.querySelector('.colour-btn');
 
     // a shape does still offer one
     a.store.clear();
@@ -1243,18 +1330,28 @@ async function run(win, app) {
                   rotation: 0, stroke: '#e81123', fill: 'none', lineWidth: 3 });
     a.setSelection(['c2']);
     updateSelectionBar(a);
-    await new Promise(r => setTimeout(r, 40));
-    const shapeHasSwatch = !!document.getElementById('ctxbar').querySelector('.colour-btn');
+    await sleep(40);
+    r.shapeHasSwatch = !!document.getElementById('ctxbar').querySelector('.colour-btn');
 
     a.store.clear(); a.setSelection([]);
-    return { shapeDefault, noteDefault, textDefault, penDefault,
-             newNoteColor: newNote ? newNote.color : null, imageButtons, imageHasSwatch, shapeHasSwatch };
+    return r;
   `);
-  check('a colour picked from the selection bar becomes the default',
-    colours.shapeDefault === '#e81123' && colours.noteDefault === '#a4e7a0' &&
-    colours.textDefault === '#0078d4' && colours.penDefault === '#8764b8',
-    JSON.stringify({ shape: colours.shapeDefault, note: colours.noteDefault }));
-  check('a new object uses the remembered colour', colours.newNoteColor === '#a4e7a0', colours.newNoteColor);
+  const recoloured = ['note', 'text', 'outline', 'fill', 'stroke']
+    .map((k) => `${k}: ${colours[k].picked ? `${colours[k].picked} -> object is ${colours[k].now}` : colours[k].why}`);
+  check('the selection bar recolours the selected note, text, shape and stroke',
+    ['note', 'text', 'outline', 'fill', 'stroke'].every((k) => colours[k].picked && colours[k].now === colours[k].picked),
+    recoloured.join('; '));
+  const changed = Object.keys(colours.before).filter((k) => colours.before[k] !== colours.after[k]);
+  check('and leaves every default alone, the pen in your hand included',
+    changed.length === 0,
+    `defaults that moved: ${changed.map((k) => `${k} ${colours.before[k]} -> ${colours.after[k]}`).join(', ') || 'none'} — ` +
+    `recolouring one word used to make every later word that colour, and one old stroke used to swap your pen's ink`);
+  check('so the next new note still comes out in the default colour',
+    colours.nextNote === colours.before.note,
+    `next note ${colours.nextNote}, default ${colours.before.note}`);
+  check('while the tool’s own picker still sets what comes next',
+    !!colours.toolPicked && colours.toolSetDefault === colours.toolPicked && colours.toolNextNote === colours.toolPicked,
+    `picked ${colours.toolPicked} in the note tool's popover; default became ${colours.toolSetDefault}, next note ${colours.toolNextNote}`);
   check('images offer no colour control', colours.imageHasSwatch === false && colours.imageButtons > 0,
     colours.imageButtons + ' buttons, swatch ' + colours.imageHasSwatch);
   check('shapes still offer one', colours.shapeHasSwatch === true);
@@ -1335,6 +1432,70 @@ async function run(win, app) {
   check('no spikes or barbs on a fast stroke',
     feel.sparse.worst < feel.sparse.half + 6,
     `${feel.sparse.worst}px from the curve at ${feel.sparse.samples} samples, half-width ${feel.sparse.half.toFixed(1)}px`);
+
+  /*
+   * The same measurement, on a stroke whose width VARIES.
+   *
+   * The checks above draw at one width, which is what the ink engine did for
+   * years. Varying it is the new thing, and the note at the top of ink.js
+   * explains exactly what went wrong the last time width was not constant:
+   * offsetting a centreline into an outline crosses itself at a sharp turn and
+   * throws a spike out sideways. Barbs on the letters.
+   *
+   * Runs are not outlines - each is a stroked centreline like the whole stroke
+   * used to be - so there should be nothing to spike. "Should" is not a test.
+   * This inks the real renderer down a wiggly curve with pressure swinging
+   * along it, and measures how far the furthest inked pixel strays.
+   */
+  const varyFeel = await js(`
+    const { drawObject } = await import('app://board/js/core/render.js');
+    const { pressureRuns } = await import('app://board/js/core/ink.js');
+
+    const truth = [];
+    for (let t = 0; t <= Math.PI * 6; t += 0.004)
+      truth.push({ x: t * 26 + 10, y: 28 * Math.sin(t) + 11 * Math.sin(2.6 * t) + 110 });
+
+    // Sampled fast - 26px apart - AND with pressure swinging light to hard and
+    // back twice, so the width is changing through every sharp turn.
+    const pts = [];
+    for (let t = 0; t <= Math.PI * 6; t += 0.34)
+      pts.push({ x: t * 26, y: 28 * Math.sin(t) + 11 * Math.sin(2.6 * t),
+        p: 0.15 + (Math.sin(t * 1.7) * 0.5 + 0.5) * 0.8 });
+
+    const c = document.createElement('canvas');
+    c.width = 700; c.height = 230;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.translate(10, 110);
+    drawObject(ctx, { type: 'stroke', tool: 'pen', color: '#000', width: 8, opacity: 1,
+      effect: 'none', rotation: 0, points: pts,
+      bbox: { x: 0, y: -60, w: 500, h: 120 } }, () => {});
+
+    const widths = pressureRuns(pts, 8).map((r) => r.width);
+    const half = Math.max(...widths) / 2;
+
+    const img = ctx.getImageData(0, 0, c.width, c.height).data;
+    let worst = 0, inked = 0;
+    for (let y = 0; y < c.height; y++) {
+      for (let x = 0; x < c.width; x++) {
+        if (img[(y * c.width + x) * 4] > 128) continue;
+        inked++;
+        let best = Infinity;
+        for (const q of truth) {
+          const d = Math.hypot(q.x - x, q.y - y);
+          if (d < best) { best = d; if (best < 1) break; }
+        }
+        if (best > worst) worst = best;
+      }
+    }
+    return { worst: +worst.toFixed(2), inked, half: +half.toFixed(2),
+             runs: widths.length, samples: pts.length };
+  `);
+  check('a stroke whose width varies still hugs the curve - no barbs from the runs',
+    varyFeel.worst < varyFeel.half + 6 && varyFeel.inked > 500,
+    `${varyFeel.worst}px out, half-width ${varyFeel.half}px, across ${varyFeel.runs} runs`);
+  check('and it is one continuous line, not a dashed one with gaps at the joins',
+    varyFeel.inked > 500, `${varyFeel.inked} inked pixels`);
 
   const grow = await js(`
     const a = window.app, it = a.interaction, sf = a.surface;
@@ -2046,24 +2207,761 @@ async function run(win, app) {
     it.onMove(mk(X(302), Y(301), 'mouse', 0));
     const afterGhost = sf.canvas.style.cursor || '';
 
-    // a real mouse move, later, must still say what a click will do
-    it._penAt = 0;
+    // The same ghost, arriving a minute late - which is what a busy machine
+    // does to it. Nothing about the message has changed, so nothing about the
+    // answer should either. This is the case the old clock got wrong.
+    it._penAt = performance.now() - 60000;
+    it.onMove(mk(X(302), Y(301), 'mouse', 0));
+    const afterLateGhost = sf.canvas.style.cursor || '';
+
+    // A real mouse move must still say what a click will do - and it is
+    // recognised by being a STREAM of reports from somewhere else, not by any
+    // clock having run out. One report is what Windows sends by itself; a hand
+    // on a mouse keeps producing them.
     it.onMove(mk(X(500), Y(400), 'mouse', 0));
+    it.onMove(mk(X(520), Y(410), 'mouse', 0));
     const afterRealMouse = sf.canvas.style.cursor || '';
 
     a.store.clear(); it.action = null; it.pointers.clear();
     a.settings.inkWithMouse = wasInk; a.penSeenThisSession = false;
     return { nibIsPen: nib.startsWith('url(') && layerGone, ghostKeptNib: afterGhost === nib,
+             lateGhostKeptNib: afterLateGhost === nib,
              realMouseStillGrabs: afterRealMouse === 'grab',
-             ghost: afterGhost.slice(0, 20), real: afterRealMouse };
+             ghost: afterGhost.slice(0, 20), late: afterLateGhost.slice(0, 20), real: afterRealMouse };
   `);
   check('the pen nib survives the pen lifting off', afterLift.nibIsPen);
   check('and the system cursor is what carries it once the stroke is over',
     afterLift.ghost.startsWith('url('), `cursor "${afterLift.ghost}"`);
   check('the cursor does not flash to a hand when the pen leaves the screen',
     afterLift.ghostKeptNib, `became "${afterLift.ghost}"`);
+  // The bug this replaced: the ghost used to be recognised partly by arriving
+  // quickly, so a machine busy with a screen recorder delivered it late, it was
+  // believed, and a hand blinked where the pen had been between every two words.
+  check('and not even when that message arrives a minute late on a busy machine',
+    afterLift.lateGhostKeptNib, `became "${afterLift.late}"`);
   check('but a real mouse move still shows what a click will do',
     afterLift.realMouseStillGrabs, afterLift.real);
+
+  /* ---- the handover at the end of a stroke overlaps, it does not gap ---- */
+  //
+  // The nib is two things that trade places: the system cursor while the pen
+  // hovers, our own layer while it draws. Windows only takes its pointer away
+  // for a pen, which is why a mouse never sees any of this and never flickered.
+  //
+  // The layer must stay up until the system cursor has had a frame to arrive.
+  // Both nibs at once is invisible - same glyph, same hotspot. Neither nib is
+  // the blink, and under a screen recorder that frame is long enough to see.
+  const handover = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    const el = document.getElementById('inkNib');
+    a.newBoard(true); sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.setTool('pen'); a.notePenSeen();
+    it.action = null; it.actionId = null; it.pointers.clear();
+    const rect = sf.canvas.getBoundingClientRect();
+    const X = (v) => rect.left + v, Y = (v) => rect.top + v;
+    const mk = (x, y, type, buttons) => ({ pointerId: type === 'mouse' ? 3 : 1, pointerType: type,
+      button: 0, buttons, clientX: x, clientY: y, shiftKey: false, altKey: false, pressure: 0.5 });
+
+    it.onDown(mk(X(300), Y(300), 'pen', 1));
+    it.onMove(mk(X(304), Y(302), 'pen', 1));
+    const layerDrawsTheStroke = !el.hidden;      // ours, while the pen is down
+
+    it.onUp(mk(X(304), Y(302), 'pen', 0));
+    // Same task as the lift: the system cursor is already asked for, and our
+    // copy is deliberately still up. This is the overlap.
+    const cursorBack = (sf.canvas.style.cursor || '').startsWith('url(');
+    const stillOverlapping = !el.hidden;
+
+    // One frame later it has served its purpose and goes.
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const goneAfterAFrame = el.hidden;
+
+    a.store.clear(); it.action = null; it.pointers.clear(); a.penSeenThisSession = false;
+    return { layerDrawsTheStroke, cursorBack, stillOverlapping, goneAfterAFrame };
+  `);
+  check('our own nib carries the stroke while the pen is down',
+    handover.layerDrawsTheStroke);
+  check('the system cursor is handed the nib back the instant the pen lifts',
+    handover.cursorBack);
+  check('and our copy stays up over it for that frame, so there is never a gap',
+    handover.stillOverlapping);
+  check('then goes, once the system cursor has had a frame to arrive',
+    handover.goneAfterAFrame);
+
+  /*
+   * The overlap has to FOLLOW the pointer, not mark where the stroke stopped.
+   *
+   * On an idle machine the hide lands within one frame and a stale copy could
+   * never be seen. Under a screen recorder that frame stretches, the hand has
+   * moved on, and there are two nibs on screen in different places - the system
+   * cursor under the pen and ours back at the last full stop. It reads as the
+   * nib reappearing in the wrong spot after every stroke and then catching up.
+   */
+  const trailing = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    const el = document.getElementById('inkNib');
+    const had = new Set(a.store.objects.map((o) => o.id));
+    a.setTool('pen'); a.notePenSeen();
+    it.action = null; it.actionId = null; it.pointers.clear();
+    const rect = sf.canvas.getBoundingClientRect();
+    const X = (v) => rect.left + v, Y = (v) => rect.top + v;
+    const mk = (x, y, type, buttons) => ({ pointerId: 1, pointerType: type,
+      button: 0, buttons, clientX: x, clientY: y, shiftKey: false, altKey: false, pressure: 0.5 });
+    // No regex: a backslash inside this template literal is eaten before the
+    // renderer ever sees it, and the pattern arrives unbalanced.
+    const xOf = () => {
+      const tr = el.style.transform || '';
+      const i = tr.indexOf('translate3d(');
+      return i < 0 ? null : Math.round(parseFloat(tr.slice(i + 12)));
+    };
+
+    it.onDown(mk(X(300), Y(300), 'pen', 1));
+    it.onMove(mk(X(320), Y(300), 'pen', 1));
+    it.onUp(mk(X(320), Y(300), 'pen', 0));
+    const parkedAt = xOf();
+
+    // The hand carries on moving while the hide is still pending. Every hover
+    // move in that window has to take the departing copy with it.
+    it.onMove(mk(X(520), Y(360), 'pen', 0));
+    const followedTo = xOf();
+    const stillUp = !el.hidden;
+
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const goneInTheEnd = el.hidden;
+
+    const mine = a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id);
+    if (mine.length) a.store.remove(mine);
+    it.action = null; it.pointers.clear(); a.penSeenThisSession = false;
+    return { parkedAt, followedTo, stillUp, goneInTheEnd };
+  `);
+  check('a nib on its way out follows the hand instead of marking where the stroke stopped',
+    trailing.followedTo !== null && trailing.parkedAt !== null
+    && trailing.followedTo - trailing.parkedAt === 200,
+    `moved from ${trailing.parkedAt} to ${trailing.followedTo}`);
+  check('and it is still the overlap while it does that, not a second nib',
+    trailing.stillUp && trailing.goneInTheEnd);
+
+  /*
+   * Pressure, which somebody reported did not work - and it did not.
+   *
+   * Every sample carried its own pressure and the renderer then averaged the
+   * lot into ONE width for the whole stroke. So a stroke drawn hard was a
+   * little fatter than a stroke drawn softly, and pressing harder in the
+   * middle of a word did precisely nothing. That is not what anybody means by
+   * pressure sensitivity.
+   */
+  const pressure = await js(`
+    const ink = await import('app://board/js/core/ink.js');
+    const a = window.app, it = a.interaction, sf = a.surface;
+    a.newBoard(true); sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.settings.pressure = true;
+    a.setTool('pen'); a.notePenSeen();
+    it.action = null; it.actionId = null; it.pointers.clear();
+    const rect = sf.canvas.getBoundingClientRect();
+    const mk = (x, y, buttons, p, type) => ({ pointerId: 4, pointerType: type || 'pen',
+      button: 0, buttons, pressure: p, clientX: rect.left + x, clientY: rect.top + y,
+      shiftKey: false, altKey: false });
+
+    // A stroke that starts light, presses hard through the middle, lifts off.
+    it.onDown(mk(120, 300, 1, 0.15));
+    for (let i = 1; i <= 24; i++) {
+      const t = i / 24;
+      const press = 0.15 + Math.sin(t * Math.PI) * 0.8;
+      it.onMove(mk(120 + i * 12, 300 + Math.sin(t * 6) * 8, 1, press));
+    }
+    it.onUp(mk(120 + 24 * 12, 300, 0, 0.15));
+    const drawn = a.store.objects.filter((o) => o.type === 'stroke').pop();
+    const ps = (drawn.points || []).map((q) => q.p);
+    const captured = { lo: Math.min(...ps), hi: Math.max(...ps), n: ps.length };
+
+    // What the renderer will actually lay down.
+    const runs = ink.pressureRuns(drawn.points, drawn.width || 4);
+    const widths = runs.map((r) => r.width);
+    const varied = { runs: runs.length, lo: Math.min(...widths), hi: Math.max(...widths) };
+
+    // The mean width must still be about what the old single-width code gave,
+    // or every board in the world would suddenly look heavier or lighter.
+    const oldWeight = ink.strokeWeight(drawn.points, drawn.width || 4, true);
+    let sum = 0;
+    for (const w of widths) sum += w;
+    const meanWidth = sum / widths.length;
+
+    // A stroke with no pressure in it - a mouse, or anything drawn before
+    // today - must take the old route and come out at ONE width.
+    const flat = drawn.points.map((q) => ({ x: q.x, y: q.y, p: 0.5 }));
+    const flatVaries = ink.hasPressureVariation(flat);
+    const flatRuns = ink.pressureRuns(flat, drawn.width || 4);
+    const flatWidths = [...new Set(flatRuns.map((r) => r.width))];
+
+    a.store.clear(); a.penSeenThisSession = false; a.setTool('select');
+    it.action = null; it.pointers.clear();
+    return { captured, varied, meanWidth, oldWeight,
+             sawVariation: ink.hasPressureVariation(drawn.points),
+             flatVaries, flatWidths: flatWidths.length };
+  `);
+  check('a pen stroke records the pressure of every sample, not one number',
+    pressure.captured.hi - pressure.captured.lo > 0.5,
+    `${pressure.captured.n} points, ${pressure.captured.lo.toFixed(2)}-${pressure.captured.hi.toFixed(2)}`);
+  check('and the renderer is told that stroke carries pressure', pressure.sawVariation);
+  check('so the line is actually laid down at several widths, not one',
+    pressure.varied.runs > 2 && pressure.varied.hi / pressure.varied.lo > 1.5,
+    `${pressure.varied.runs} runs, ${pressure.varied.lo.toFixed(2)}-${pressure.varied.hi.toFixed(2)}px`);
+  check('while the stroke overall stays the weight it always was',
+    Math.abs(pressure.meanWidth - pressure.oldWeight) / pressure.oldWeight < 0.25,
+    `mean ${pressure.meanWidth.toFixed(2)}px vs ${pressure.oldWeight.toFixed(2)}px before`);
+  check('ink with no pressure in it - a mouse, or any board drawn before today - is untouched',
+    pressure.flatVaries === false && pressure.flatWidths === 1,
+    `${pressure.flatWidths} width`);
+
+  /*
+   * The button on the side of a stylus.
+   *
+   * GazBoard understood a pen's TAIL - flip a Wacom over and its blunt end
+   * reports itself as an eraser. An S Pen has no tail; it has a side button,
+   * and on Samsung's own apps holding that while you draw is how you rub out.
+   * Somebody tried it, found annotating worked and erasing did not, and
+   * reasonably assumed the feature was missing.
+   *
+   * A browser calls it the barrel button - bit 2 of `buttons`. With the tip
+   * also down the value is 3: primary AND secondary, which is what makes it
+   * unambiguous.
+   */
+  const sideButton = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    a.newBoard(true); sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.setTool('pen'); a.notePenSeen();
+    const rect = sf.canvas.getBoundingClientRect();
+    const mk = (x, y, buttons, button) => ({ pointerId: 11, pointerType: 'pen',
+      button: button === undefined ? 0 : button, buttons, pressure: 0.5,
+      clientX: rect.left + x, clientY: rect.top + y, shiftKey: false, altKey: false });
+    const strokes = () => a.store.objects.filter((o) => o.type === 'stroke').length;
+
+    // Something to rub out.
+    it.action = null; it.pointers.clear();
+    it.onDown(mk(200, 200, 1));
+    for (let i = 1; i <= 10; i++) it.onMove(mk(200 + i * 14, 200, 1));
+    it.onUp(mk(340, 200, 0));
+    const drawn = strokes();
+
+    // Now the same pen, tip down, with the side button held: buttons = 3.
+    it.action = null; it.pointers.clear();
+    const asErase = it.effectiveTool(mk(200, 200, 3));
+    it.onDown(mk(190, 200, 3));
+    for (let i = 1; i <= 12; i++) it.onMove(mk(190 + i * 14, 200, 3));
+    it.onUp(mk(358, 200, 0));
+    const afterErase = strokes();
+
+    // Switched off, that same grip draws instead of erasing.
+    a.settings.penButtonErases = false;
+    const asDraw = it.effectiveTool(mk(200, 300, 3));
+    a.settings.penButtonErases = true;
+
+    // A tail-first pen still erases whatever the setting says.
+    a.settings.penButtonErases = false;
+    const tail = it.effectiveTool(mk(200, 300, 32));
+    a.settings.penButtonErases = true;
+
+    a.store.clear(); a.penSeenThisSession = false; a.setTool('select');
+    it.action = null; it.pointers.clear();
+    return { drawn, afterErase, asErase, asDraw, tail };
+  `);
+  check('holding a stylus side button while writing rubs out',
+    sideButton.asErase === 'eraser', sideButton.asErase);
+  check('and it really removes the ink, not just picks the tool',
+    sideButton.drawn === 1 && sideButton.afterErase === 0,
+    `${sideButton.drawn} stroke drawn, ${sideButton.afterErase} left`);
+  check('switched off, that same grip draws - for anyone who maps that button to right-click',
+    sideButton.asDraw === 'pen', sideButton.asDraw);
+  check('a pen turned over to its blunt end erases whatever the setting says',
+    sideButton.tail === 'eraser', sideButton.tail);
+
+  /*
+   * What varying the width costs, and what it must not undo.
+   *
+   * Two things were paid for once and must not be spent again:
+   *
+   * The highlighter is translucent. Drawn as several overlapping runs it would
+   * darken wherever a stroke crossed itself - the blotches that caused the ink
+   * rewrite in the first place. It has to stay on the one-call route.
+   *
+   * And a page of handwriting is now several draw calls per stroke instead of
+   * one. That is fine if the runs stay few; it is not fine if it turns into
+   * one call per sample. This measures a board of pressure strokes against the
+   * same board without pressure, which is what the old code drew.
+   */
+  const inkCost = await js(`
+    const ink = await import('app://board/js/core/ink.js');
+    const a = window.app, sf = a.surface;
+    a.settings.autosave = false;
+    a.newBoard(true); sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+
+    // 300 strokes of real handwriting length, each with pressure along it.
+    const bulk = [];
+    for (let i = 0; i < 300; i++) {
+      const pts = [];
+      for (let j = 0; j < 30; j++) {
+        const t = j / 29;
+        pts.push({ x: (i % 20) * 90 + j * 2.4, y: Math.floor(i / 20) * 70 + Math.sin(t * 5) * 9,
+          p: 0.15 + Math.sin(t * Math.PI) * 0.8 });
+      }
+      bulk.push({ id: 'ps' + i, type: 'stroke', tool: 'pen', color: '#201f1e', width: 4,
+        effect: 'none', opacity: 1, rotation: 0, points: pts,
+        bbox: { x: (i % 20) * 90, y: Math.floor(i / 20) * 70, w: 72, h: 20 } });
+    }
+    a.store.addMany ? a.store.addMany(bulk) : bulk.forEach((o) => a.store.add(o));
+
+    // How many draw calls this really costs, per stroke.
+    let runs = 0;
+    for (const o of bulk) runs += ink.pressureRuns(o.points, o.width).length;
+    const perStroke = runs / bulk.length;
+
+    const time = (fn) => { const t0 = performance.now(); fn(); return performance.now() - t0; };
+    sf.draw(); // warm
+    const withPressure = time(() => { sf.invalidate(); sf.draw(); });
+
+    // The same board with the pressure flattened out: the old single-width path.
+    for (const o of bulk) { o.points = o.points.map((q) => ({ x: q.x, y: q.y, p: 0.5 })); }
+    sf.draw();
+    const flat = time(() => { sf.invalidate(); sf.draw(); });
+
+    // And the highlighter must never take the varying route.
+    const hl = { type: 'stroke', tool: 'highlighter', opacity: 0.38, width: 20,
+      points: bulk[0].points.map((q, i) => ({ x: q.x, y: q.y, p: 0.15 + (i / 30) * 0.8 })) };
+    const hlVaries = ink.hasPressureVariation(hl.points);
+
+    a.store.clear(); a.settings.autosave = true;
+    return { perStroke, withPressure, flat, hlVaries };
+  `);
+  check('a pressure stroke stays a handful of draw calls, not one per sample',
+    inkCost.perStroke < 12, inkCost.perStroke.toFixed(1) + ' runs per 30-point stroke');
+  check('and a 300-stroke page of it still redraws in a frame',
+    inkCost.withPressure < 16,
+    `${inkCost.withPressure.toFixed(1)} ms with pressure, ${inkCost.flat.toFixed(1)} ms without`);
+  // The highlighter's points DO vary - it is the renderer that must ignore
+  // that, because translucent ink laid down twice is darker ink.
+  check('the highlighter\'s own points do vary, so this is the renderer\'s job to ignore',
+    inkCost.hlVaries === true);
+
+  /*
+   * A big board, pulled back.
+   *
+   * This is the case the cost check above misses, and it cost somebody a real
+   * afternoon: 300 strokes at one zoom level, where culling hides the problem.
+   * Zoom out on 2688 strokes and NOTHING is culled - every object is on screen
+   * at once - and splitting each of them into runs multiplied the work by
+   * eleven. Nobody could see the difference at that size. They could see the
+   * frame rate.
+   */
+  const bigBoard = await js(`
+    const a = window.app, sf = a.surface;
+    a.settings.autosave = false;
+    a.newBoard(true);
+
+    const bulk = [];
+    for (let i = 0; i < 2688; i++) {
+      const pts = [];
+      for (let j = 0; j < 40; j++) {
+        const t = j / 39;
+        pts.push({ x: (i % 64) * 130 + j * 3, y: Math.floor(i / 64) * 90 + Math.sin(t * 5) * 6,
+          p: 0.15 + Math.sin(t * Math.PI) * 0.8 });
+      }
+      bulk.push({ id: 'bb' + i, type: 'stroke', tool: 'pen', color: '#201f1e', width: 4,
+        effect: 'none', opacity: 1, rotation: 0, points: pts,
+        bbox: { x: (i % 64) * 130, y: Math.floor(i / 64) * 90, w: 120, h: 14 } });
+    }
+    a.store.addMany ? a.store.addMany(bulk) : bulk.forEach((o) => a.store.add(o));
+
+    const time = (fn) => { const t0 = performance.now(); fn(); return performance.now() - t0; };
+    const frameAt = (z) => {
+      sf.cam.z = z; sf.cam.x = 0; sf.cam.y = 0;
+      sf.invalidate(); sf.draw();
+      let best = Infinity;
+      for (let i = 0; i < 5; i++) best = Math.min(best, time(() => { sf.invalidate(); sf.draw(); }));
+      return best;
+    };
+
+    const out = frameAt(0.12);
+    const near = frameAt(1);
+
+    // Count the work separately from the stopwatch. The same scene can miss
+    // 16ms on a software rasteriser and pass on a GPU without a code change.
+    // A fixed viewport fits EVERY stroke at 12%, even on a small laptop.
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const stroke = ctx.stroke;
+    let calls = 0;
+    ctx.stroke = function (...args) {
+      if (args[0] instanceof Path2D) calls++;   // ink, not the background grid
+      return stroke.apply(this, args);
+    };
+    const countAt = (z, dpr, x = 0) => {
+      sf.dpr = dpr; sf.cam.z = z; sf.cam.x = x; sf.cam.y = 0;
+      canvas.width = 1200 * dpr; canvas.height = 800 * dpr;
+      calls = 0;
+      sf.drawScene(ctx, 1200, 800);
+      return calls;
+    };
+    const dpr = sf.dpr;
+    let outCalls, retinaCalls, nearCalls, awayCalls;
+    try {
+      outCalls = countAt(0.12, 1);
+      retinaCalls = countAt(0.12, 2);
+      nearCalls = countAt(1, 1);
+      awayCalls = countAt(1, 1, 100000);
+    } finally {
+      sf.dpr = dpr;
+      ctx.stroke = stroke;
+    }
+
+    a.store.clear(); a.settings.autosave = true;
+    sf.cam.z = 1; sf.cam.x = 0; sf.cam.y = 0;
+    return { out, near, objects: bulk.length, outCalls, retinaCalls, nearCalls, awayCalls };
+  `);
+  check('a 2688-object board uses one draw call per stroke when pulled right back',
+    bigBoard.outCalls === bigBoard.objects && bigBoard.retinaCalls === bigBoard.objects,
+    `${bigBoard.outCalls} calls at 1x, ${bigBoard.retinaCalls} at 2x; ${bigBoard.out.toFixed(1)} ms per frame at 12% zoom`);
+  check('and close up, off-screen ink is culled before drawing',
+    bigBoard.nearCalls > 0 && bigBoard.nearCalls < bigBoard.outCalls && bigBoard.awayCalls === 0,
+    `${bigBoard.nearCalls} calls at 100%, ${bigBoard.awayCalls} away from the board; ${bigBoard.near.toFixed(1)} ms per frame at 100%`);
+  // Optional hardware benchmark: npm run smoke -- --strict-performance
+  // Normal smoke runs defend draw cost, just like the handwriting checks below.
+  if (process.argv.includes('--strict-performance')) {
+    check('a 2688-object board redraws within the strict 16ms budget at 12%',
+      bigBoard.out < 16, bigBoard.out.toFixed(1) + ' ms per frame');
+    check('a 2688-object board redraws within the strict 16ms budget at 100%',
+      bigBoard.near < 16, bigBoard.near.toFixed(1) + ' ms per frame');
+  }
+
+  /*
+   * The two things a whiteboard is actually for, on that same board.
+   *
+   * They cost different amounts and it matters which is which.
+   *
+   * INKING leans on a frozen copy: nothing in the document can change while a
+   * stroke is in flight, so the board is painted once and blitted after that.
+   * The price is one full paint as the pen lands, then almost nothing.
+   *
+   * ERASING cannot do that. It changes the document on every move, so the
+   * frozen copy is void and the board is repainted each time. That is the
+   * harder half, and this measures it honestly rather than assuming the ink
+   * fix covered it.
+   */
+  const bothTools = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    a.settings.autosave = false;
+    a.newBoard(true);
+    const bulk = [];
+    for (let i = 0; i < 2688; i++) {
+      const pts = [];
+      for (let j = 0; j < 40; j++) {
+        const t = j / 39;
+        pts.push({ x: (i % 64) * 130 + j * 3, y: Math.floor(i / 64) * 90 + Math.sin(t * 5) * 6,
+          p: 0.15 + Math.sin(t * Math.PI) * 0.8 });
+      }
+      bulk.push({ id: 'tb' + i, type: 'stroke', tool: 'pen', color: '#201f1e', width: 4,
+        effect: 'none', opacity: 1, rotation: 0, points: pts,
+        bbox: { x: (i % 64) * 130, y: Math.floor(i / 64) * 90, w: 120, h: 14 } });
+    }
+    a.store.addMany ? a.store.addMany(bulk) : bulk.forEach((o) => a.store.add(o));
+
+    sf.cam.z = 0.12; sf.cam.x = 0; sf.cam.y = 0;
+    sf.invalidate(); sf.draw();
+    const time = (fn) => { const t0 = performance.now(); fn(); return performance.now() - t0; };
+    const rect = sf.canvas.getBoundingClientRect();
+    const mk = (x, y, buttons, type) => ({ pointerId: 21, pointerType: type || 'pen', button: 0,
+      buttons, pressure: 0.6, clientX: rect.left + x, clientY: rect.top + y,
+      shiftKey: false, altKey: false });
+
+    /* ---- inking ---- */
+    a.setTool('pen'); a.notePenSeen();
+    it.action = null; it.pointers.clear();
+    it.onDown(mk(300, 300, 1));
+    const inkFirst = time(() => { sf.invalidate(); sf.draw(); });   // the freeze
+    let inkAfter = Infinity;
+    for (let i = 1; i <= 12; i++) {
+      it.onMove(mk(300 + i * 9, 300 + i * 4, 1));
+      inkAfter = Math.min(inkAfter, time(() => { sf.invalidate(); sf.draw(); }));
+    }
+    it.onUp(mk(410, 350, 0));
+
+    /* ---- erasing ---- */
+    // Driven the way the app drives it: the move decides for itself how much
+    // needs repainting. Forcing invalidate() here would ask for the whole
+    // board every time and measure something the app never does.
+    a.setTool('eraser');
+    it.action = null; it.pointers.clear();
+    it.onDown(mk(500, 300, 1));
+    sf.draw();
+    let eraseWorst = 0, eraseBest = Infinity, banded = 0, full = 0;
+    const eraseTimes = [];
+    for (let i = 1; i <= 12; i++) {
+      it.onMove(mk(500 + i * 11, 300 + i * 3, 1));
+      if (sf._bandOnly && sf._band && sf._painted) banded++; else full++;
+      const t = time(() => sf.draw());
+      eraseTimes.push(t);
+      if (t > eraseWorst) eraseWorst = t;
+      if (t < eraseBest) eraseBest = t;
+    }
+    it.onUp(mk(632, 336, 0));
+
+    a.store.clear(); a.settings.autosave = true;
+    a.penSeenThisSession = false; a.setTool('select');
+    sf.cam.z = 1; sf.cam.x = 0; sf.cam.y = 0;
+    it.action = null; it.pointers.clear();
+    const sorted = eraseTimes.slice().sort((p, q) => p - q);
+    const eraseMedian = sorted[Math.floor(sorted.length / 2)];
+    return { inkFirst, inkAfter, eraseBest, eraseWorst, eraseMedian, banded, full };
+  `);
+  /*
+   * These two are measured, and only the SECOND is asserted hard.
+   *
+   * Once a stroke is under way it costs nothing - the frozen copy does its
+   * job, and that is worth defending with a real threshold.
+   *
+   * The paint as the pen lands is still a whole board, and is meant to be:
+   * that one frame is what everything after it is blitted from.
+   *
+   * An eraser move is NOT, any more. It repaints only the band it crossed -
+   * the segment plus the eraser's own radius, plus where the ring was last
+   * frame and where it is now, so nothing stale is left behind. On 2688
+   * objects pulled right back that took a move from 88ms to about 1ms, and
+   * the count below is the proof it is really taking that path rather than
+   * quietly falling back to painting everything.
+   */
+  check('once a stroke is under way, a huge board costs nothing per move',
+    bothTools.inkAfter < 4,
+    `${bothTools.inkAfter.toFixed(2)} ms a move, after ${bothTools.inkFirst.toFixed(1)} ms as the pen lands`);
+  /*
+   * The band COUNT is the assertion; the milliseconds are reported, not gated.
+   *
+   * A tight stopwatch here fails for the wrong reason. This suite runs on a
+   * build box with a software rasteriser as well as on real hardware, and the
+   * same correct code measured 0.4ms a move on one run here and 7.9ms on the
+   * next - noise from the machine, not from the app. A threshold in the gap
+   * fails at random before a demo and teaches you to ignore the suite.
+   *
+   * The count cannot be fooled that way. If this ever regresses to repainting
+   * the whole board it shows up as "0 banded / 12 full", which is the failure
+   * worth catching. The ceiling below is left deliberately loose - it is there
+   * to trip on the 88ms-a-move behaviour this replaced, nothing finer.
+   */
+  /*
+   * The typical move, not the single worst one. One move out of twelve can
+   * land on a garbage collection or a busy moment on the machine - a Windows
+   * PC measured 2.8ms at best and one 63ms spike, with all twelve moves
+   * correctly banded. The behaviour this guards against is slow on EVERY
+   * move, so the middle of the twelve catches it and a lone spike does not.
+   */
+  check('and erasing on that board costs the band under the eraser, not the board',
+    bothTools.banded === 12 && bothTools.full === 0 && bothTools.eraseMedian < 30,
+    `typical move ${bothTools.eraseMedian.toFixed(1)} ms (allowed under 30; the old whole-board path cost 88), `
+      + `best ${bothTools.eraseBest.toFixed(1)}, worst ${bothTools.eraseWorst.toFixed(1)}; `
+      + `${bothTools.banded} banded / ${bothTools.full} full`);
+
+  /*
+   * Writing a WORD, not drawing a line.
+   *
+   * The test above draws one long stroke, and one long stroke pays for the
+   * frozen copy once. Real handwriting is a dozen short strokes with a pen
+   * lift between each, and every lift commits ink to the document - which used
+   * to make the copy stale, so the next letter repainted all 2688 objects
+   * before it could put down a mark. Measured that way it was ~48ms a stroke:
+   * the lag reported as "inking is unusable when everything is in view", and
+   * completely invisible to a one-stroke test.
+   *
+   * Only strokes 2..12 are asserted. The first one is meant to be expensive -
+   * it is the paint that everything after it is blitted from.
+   */
+  const writing = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    a.settings.autosave = false;
+    a.newBoard(true);
+    const bulk = [];
+    for (let i = 0; i < 2688; i++) {
+      const pts = [];
+      for (let j = 0; j < 40; j++) {
+        const t = j / 39;
+        pts.push({ x: (i % 64) * 130 + j * 3, y: Math.floor(i / 64) * 90 + Math.sin(t * 5) * 6,
+          p: 0.15 + Math.sin(t * Math.PI) * 0.8 });
+      }
+      bulk.push({ id: 'wb' + i, type: 'stroke', tool: 'pen', color: '#201f1e', width: 4,
+        effect: 'none', opacity: 1, rotation: 0, points: pts,
+        bbox: { x: (i % 64) * 130, y: Math.floor(i / 64) * 90, w: 120, h: 14 } });
+    }
+    a.store.addMany ? a.store.addMany(bulk) : bulk.forEach((o) => a.store.add(o));
+
+    sf.cam.z = 0.05; sf.cam.x = 0; sf.cam.y = 0;   // everything in view at once
+    sf.invalidate(); sf.draw();
+    const rect = sf.canvas.getBoundingClientRect();
+    const mk = (x, y, buttons) => ({ pointerId: 31, pointerType: 'pen', button: 0,
+      buttons, pressure: 0.6, clientX: rect.left + x, clientY: rect.top + y,
+      shiftKey: false, altKey: false });
+
+    a.setTool('pen'); a.notePenSeen();
+    let freezes = 0; const realFreeze = sf._freezeScene.bind(sf);
+    sf._freezeScene = function (k) { freezes++; return realFreeze(k); };
+    let scenes = 0; const realScene = sf.drawScene.bind(sf);
+    sf.drawScene = function (...z) { scenes++; return realScene(...z); };
+    const costs = [];
+    for (let s = 0; s < 12; s++) {
+      it.action = null; it.pointers.clear();
+      const x0 = 200 + s * 18, y0 = 300;
+      const t0 = performance.now();
+      it.onDown(mk(x0, y0, 1));
+      sf.draw();                                    // the frame the pen lands on
+      for (let i = 1; i <= 4; i++) { it.onMove(mk(x0 + i * 3, y0 - i * 4, 1)); sf.draw(); }
+      it.onUp(mk(x0 + 12, y0 - 16, 0));
+      sf.draw();
+      costs.push(performance.now() - t0);
+    }
+
+    a.store.clear(); a.settings.autosave = true;
+    a.penSeenThisSession = false; a.setTool('select');
+    sf.cam.z = 1; sf.cam.x = 0; sf.cam.y = 0;
+    it.action = null; it.pointers.clear();
+    sf._freezeScene = realFreeze; sf.drawScene = realScene;
+    return { first: costs[0], rest: costs.slice(1), freezes, scenes };
+  `);
+  /*
+   * Counted, not timed - for the same reason the laser test is.
+   *
+   * A stopwatch here measures the machine, not the fix: this suite runs on a
+   * build box with a software rasteriser as well as on real hardware with a
+   * real GPU, and the same correct code is several times slower on one than
+   * the other. A threshold in milliseconds would either pass everywhere
+   * (useless) or fail on the slow box for no reason (worse than useless).
+   *
+   * What the fix claims is countable. Twelve strokes used to mean twelve full
+   * board paints, because each pen lift committed ink and made the frozen copy
+   * stale. It now means ONE: the finished letter is painted into the copy, so
+   * the copy stays true and the next letter starts from it. The timings are
+   * reported for eyeballing but nothing hangs on them.
+   */
+  const restWorst = Math.max(...writing.rest);
+  const restAvg = writing.rest.reduce((a, b) => a + b, 0) / writing.rest.length;
+  check('writing a word - twelve strokes, not one - freezes the board once, not twelve times',
+    writing.freezes === 1,
+    `${writing.freezes} freeze(s) for 12 strokes; `
+      + `${restAvg.toFixed(1)} ms average a stroke, ${restWorst.toFixed(1)} ms worst, `
+      + `after ${writing.first.toFixed(1)} ms for the first`);
+
+  /*
+   * Watching what is actually drawn, rather than what ought to be.
+   *
+   * Everything above reasons about the geometry. This wraps the real canvas
+   * context and counts the strokes that come out of it, because "the
+   * highlighter must stay on the one-call route" is a claim about the
+   * renderer, and the renderer is the thing that has not been checked.
+   */
+  const drawn = await js(`
+    const { drawObject } = await import('app://board/js/core/render.js');
+    const pts = [];
+    for (let j = 0; j < 30; j++) {
+      const t = j / 29;
+      pts.push({ x: 40 + j * 6, y: 60 + Math.sin(t * 5) * 8, p: 0.15 + Math.sin(t * Math.PI) * 0.8 });
+    }
+    const flatPts = pts.map((q) => ({ x: q.x, y: q.y, p: 0.5 }));
+
+    // A recording context: everything a real one does, plus a note of every
+    // stroke() and the width it was drawn at.
+    const spy = () => {
+      const c = document.createElement('canvas');
+      c.width = 400; c.height = 200;
+      const ctx = c.getContext('2d');
+      const widths = [];
+      const realStroke = ctx.stroke.bind(ctx);
+      ctx.stroke = function (...args) { widths.push(+ctx.lineWidth.toFixed(3)); return realStroke(...args); };
+      return { ctx, widths };
+    };
+    const run = (o) => { const s = spy(); drawObject(s.ctx, o, () => {}); return s.widths; };
+
+    const base = { type: 'stroke', color: '#201f1e', rotation: 0, effect: 'none',
+      bbox: { x: 0, y: 0, w: 300, h: 120 } };
+    const pen = run({ ...base, tool: 'pen', width: 4, opacity: 1, points: pts });
+    const penFlat = run({ ...base, tool: 'pen', width: 4, opacity: 1, points: flatPts });
+    const hl = run({ ...base, tool: 'highlighter', width: 20, opacity: 0.38, points: pts });
+    const off = run({ ...base, tool: 'pen', width: 4, opacity: 1, points: pts, pressure: false });
+
+    const distinct = (a) => [...new Set(a)].length;
+    return {
+      pen: { calls: pen.length, widths: distinct(pen), lo: Math.min(...pen), hi: Math.max(...pen) },
+      penFlat: { calls: penFlat.length, widths: distinct(penFlat) },
+      hl: { calls: hl.length, widths: distinct(hl), at: hl[0] },
+      off: { calls: off.length, widths: distinct(off) }
+    };
+  `);
+  check('a pen stroke with pressure really is drawn at several widths',
+    drawn.pen.widths > 3 && drawn.pen.hi / drawn.pen.lo > 1.5,
+    `${drawn.pen.calls} strokes, ${drawn.pen.widths} widths, ${drawn.pen.lo}-${drawn.pen.hi}px`);
+  check('the same shape without pressure is still ONE stroke at ONE width',
+    drawn.penFlat.calls === 1 && drawn.penFlat.widths === 1,
+    `${drawn.penFlat.calls} stroke, ${drawn.penFlat.widths} width`);
+  check('the highlighter is still ONE stroke, so crossing itself cannot darken it',
+    drawn.hl.calls === 1 && drawn.hl.widths === 1,
+    `${drawn.hl.calls} stroke at ${drawn.hl.at}px`);
+  check('and a stroke saved with pressure switched off is left alone',
+    drawn.off.calls === 1 && drawn.off.widths === 1,
+    `${drawn.off.calls} stroke, ${drawn.off.widths} width`);
+
+  /*
+   * None of that applies to a finger.
+   *
+   * A stylus tip is thin and the hand is elsewhere, so a nib under it helps. A
+   * fingertip is already sitting on the mark: the nib is under the hand where
+   * nobody can see it, or sliding around the board on its own. A phone has no
+   * hover either, so between strokes it has nothing to point at.
+   *
+   * So: no nib for a finger by default, on any machine, while a pen on that
+   * same machine keeps its own. A touchscreen PC that wants one under the
+   * finger turns the setting on.
+   */
+  const finger = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    const el = document.getElementById('inkNib');
+    const was = a.settings.nibOnTouch;
+    a.newBoard(true); sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.setTool('pen');
+    const rect = sf.canvas.getBoundingClientRect();
+    const mk = (x, y, type, buttons) => ({ pointerId: type === 'touch' ? 9 : 1, pointerType: type,
+      button: 0, buttons, clientX: rect.left + x, clientY: rect.top + y,
+      shiftKey: false, altKey: false, pressure: 0.5 });
+    const stroke = (type) => {
+      it.action = null; it.actionId = null; it.pointers.clear();
+      it.onDown(mk(300, 300, type, 1));
+      it.onMove(mk(340, 320, type, 1));
+      const up = !el.hidden;
+      it.onUp(mk(340, 320, type, 0));
+      it.action = null; it.pointers.clear();
+      return up;
+    };
+
+    a.settings.nibOnTouch = false;
+    const fingerNib = stroke('touch');
+    // ...and nothing is left stranded with no pointer at all afterwards.
+    const cursorAfterFinger = sf.canvas.style.cursor || '';
+
+    // The same machine, the same moment: a stylus still gets its nib.
+    a.notePenSeen();
+    const penNib = stroke('pen');
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+    // Switched on, the finger gets one too.
+    a.settings.nibOnTouch = true;
+    const optedInNib = stroke('touch');
+
+    a.settings.nibOnTouch = was;
+    it.hideInkPointer();
+    a.store.clear(); a.penSeenThisSession = false; a.setTool('select');
+    it.action = null; it.pointers.clear();
+    return { fingerNib, penNib, optedInNib, cursorAfterFinger };
+  `);
+  check('a finger drawing gets no nib - the fingertip is already on the spot',
+    finger.fingerNib === false);
+  check('and it is not left with no pointer at all either',
+    finger.cursorAfterFinger !== 'none', finger.cursorAfterFinger.slice(0, 24));
+  check('while a stylus on that same machine still gets its nib', finger.penNib === true);
+  check('and a touchscreen PC can switch the nib back on for the finger',
+    finger.optedInNib === true);
 
   /* ---- what a busy board costs while you write on it ---- */
   const busy = await js(`
@@ -2311,9 +3209,678 @@ async function run(win, app) {
   await js(`window.app.store.setBackground({ pattern: 'grid', color: '#ffffff' });`);
   check('background pattern set', (await js(`return window.app.store.doc.background.pattern;`)) === 'grid');
 
+  /*
+   * A finger tapping something already on the board.
+   *
+   * With an ink tool chosen, touch draws - right on a tablet, where the finger
+   * IS the pen. But it made everything on the board untouchable: tapping a note
+   * to write in it left a dot on the note, and the only way to reach anything
+   * was Select tool, tap, and back again. On a phone that is most of the work.
+   */
+  const tapped = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    const camWas = { x: sf.cam.x, y: sf.cam.y, z: sf.cam.z };
+    const pagesWere = a.store.doc.pages;
+    a.store.doc.pages = [];
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.penSeenThisSession = false;
+    const rect = sf.canvas.getBoundingClientRect();
+    const at = (x, y) => { const p = sf.cam.toScreen(x, y);
+      return { clientX: rect.left + p.x, clientY: rect.top + p.y }; };
+    const mk = (x, y, buttons, type) => ({ pointerId: 7, pointerType: type || 'touch', button: 0,
+      buttons, shiftKey: false, altKey: false, pressure: 0.5, ...at(x, y) });
+    const strokes = () => a.store.objects.filter((o) => o.type === 'stroke').length;
+
+    a.store.add({ id: 'tap-note', type: 'note', x: 5000, y: 5000, w: 200, h: 200,
+      color: '#ffd94a', text: 'tap me', rotation: 0, align: 'center', font: 'ui' });
+    a.store.add({ id: 'tap-img', type: 'image', x: 5400, y: 5000, w: 200, h: 150, rotation: 0,
+      src: 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', name: 'x' });
+
+    a.setTool('pen');
+    const inkBefore = strokes();
+
+    // a finger TAP on the note
+    it.action = null; it.pointers.clear();
+    it.onDown(mk(5100, 5100, 1));
+    it.onMove(mk(5101, 5100, 1));
+    it.onUp(mk(5101, 5100, 0));
+    const r = {};
+    r.noteNoInk = strokes() === inkBefore;
+    r.noteOpened = a.textEditor.active && a.textEditor.target && a.textEditor.target.id === 'tap-note';
+    a.textEditor.cancel();
+
+    // a finger TAP on the picture: picked up, not written on
+    a.setTool('pen'); it.action = null; it.pointers.clear();
+    it.onDown(mk(5500, 5060, 1));
+    it.onUp(mk(5500, 5060, 0));
+    r.imgNoInk = strokes() === inkBefore;
+    r.imgSelected = a.selected.length === 1 && a.selected[0].id === 'tap-img';
+
+    // a finger DRAG across the note still draws - it is a stroke, not a tap
+    a.setTool('pen'); a.setSelection([]); it.action = null; it.pointers.clear();
+    it.onDown(mk(5020, 5020, 1));
+    for (let i = 1; i <= 8; i++) it.onMove(mk(5020 + i * 20, 5020 + i * 10, 1));
+    it.onUp(mk(5180, 5100, 0));
+    r.dragStillDraws = strokes() === inkBefore + 1;
+
+    // a PEN tap on the note marks it, as a stylus should
+    a.setTool('pen'); a.setSelection([]); it.action = null; it.pointers.clear();
+    a.notePenSeen();
+    it.onDown(mk(5100, 5100, 1, 'pen'));
+    it.onUp(mk(5100, 5100, 0, 'pen'));
+    r.penStillMarks = strokes() === inkBefore + 2;
+
+    // a finger tap on bare board is still a dot
+    a.setTool('pen'); a.setSelection([]); it.action = null; it.pointers.clear();
+    it.onDown(mk(6200, 6200, 1));
+    it.onUp(mk(6200, 6200, 0));
+    r.bareBoardStillDots = strokes() === inkBefore + 3;
+
+    // ...but with something selected, that same tap puts the floating bar away
+    // instead of leaving another dot. That bar sits over the board, and after a
+    // press-and-hold drag the ink tool is still chosen, so the only way anyone
+    // has to dismiss it is a tap on empty space.
+    a.setTool('pen'); a.setSelection(['tap-img']); it.action = null; it.pointers.clear();
+    const barOn = document.getElementById('ctxbar').classList.contains('show');
+    it.onDown(mk(6400, 6400, 1));
+    it.onUp(mk(6400, 6400, 0));
+    r.barWasShowing = barOn;
+    r.dismissNoInk = strokes() === inkBefore + 3;
+    r.dismissCleared = a.selected.length === 0;
+    r.barPutAway = !document.getElementById('ctxbar').classList.contains('show');
+
+    a.store.doc.pages = pagesWere;
+    a.store.remove(a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id));
+    sf.cam.x = camWas.x; sf.cam.y = camWas.y; sf.cam.z = camWas.z;
+    a.penSeenThisSession = false; a.setTool('select'); a.setSelection([]);
+    it.action = null; it.pointers.clear();
+    return r;
+  `);
+  check('a finger tap on a note opens it instead of leaving a dot on it',
+    tapped.noteNoInk && tapped.noteOpened);
+  check('and a tap on a picture picks the picture up', tapped.imgNoInk && tapped.imgSelected);
+  check('while dragging a finger across them still draws, because that is a stroke',
+    tapped.dragStillDraws);
+  check('a stylus tapping the same note still marks it - this is a rule about fingers',
+    tapped.penStillMarks);
+  check('and a finger tap on bare board is still a dot', tapped.bareBoardStillDots);
+
+  /* ---- one finger moves the board, without losing the finger ---- *
+   * Two fingers to pan is friction on the movement you make most, so a finger
+   * can be told to move the board instead of drawing. The whole risk of that
+   * change is what it takes away: it must not cost you inking, pinch zoom, or
+   * the ability to get hold of an object without visiting the toolbar.
+   */
+  const fingerPan = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    a.settings.autosave = false;
+    // Later checks lean on the board this suite has been building up, and this
+    // one needs bare space to drag across - so it puts that board aside and
+    // hands it straight back.
+    const backup = JSON.parse(JSON.stringify(a.store.toJSON()));
+    a.newBoard(true);
+    const r = {};
+    const rect = sf.canvas.getBoundingClientRect();
+    const T = (x, y, buttons, id = 71) => ({ pointerId: id, pointerType: 'touch', button: 0,
+      buttons, pressure: 0.5, clientX: rect.left + x, clientY: rect.top + y,
+      shiftKey: false, altKey: false });
+    const P = (x, y, buttons) => ({ pointerId: 72, pointerType: 'pen', button: 0,
+      buttons, pressure: 0.6, clientX: rect.left + x, clientY: rect.top + y,
+      shiftKey: false, altKey: false });
+    const reset = () => { it.action = null; it.actionId = null; it.pointers.clear(); it.cancelHold(); };
+    a.setTool('pen');
+
+    // --- finger set to move the board ---
+    a.settings.inkWithFinger = 'no';
+    r.saysItMoves = a.fingerInks === false;
+    reset();
+    const cam0 = { x: sf.cam.x, y: sf.cam.y };
+    it.onDown(T(300, 300, 1));
+    for (let i = 1; i <= 6; i++) it.onMove(T(300 + i * 14, 300 + i * 6, 1));
+    r.boardMoved = Math.abs(sf.cam.x - cam0.x) > 40;
+    r.noInkFromFinger = a.store.doc.order.length === 0;
+    it.onUp(T(384, 336, 0));
+    reset();
+    sf.cam.x = cam0.x; sf.cam.y = cam0.y;
+
+    // --- the pen still draws while the finger is moving things ---
+    it.onDown(P(200, 200, 1));
+    for (let i = 1; i <= 6; i++) it.onMove(P(200 + i * 9, 200 + i * 4, 1));
+    it.onUp(P(254, 224, 0));
+    r.penStillInks = a.store.doc.order.length === 1;   // the board is empty here
+
+    // --- two fingers still pinch, they do not fight the one-finger pan ---
+    reset();
+    const z0 = sf.cam.z;
+    it.onDown(T(300, 400, 1, 81));
+    it.onDown(T(400, 400, 1, 82));
+    r.pinching = !!it.pinch;
+    it.onMove(T(260, 400, 1, 81));
+    it.onMove(T(440, 400, 1, 82));
+    r.pinchZoomed = Math.abs(sf.cam.z - z0) > 0.001;
+    it.onUp(T(260, 400, 0, 81)); it.onUp(T(440, 400, 0, 82));
+    reset();
+    sf.cam.z = z0;
+
+    // --- a finger can still get hold of an object ---
+    const box = { id: 'fpbox', type: 'shape', kind: 'rect', rotation: 0,
+      x: 0, y: 0, w: 240, h: 160, stroke: '#000', fill: '#eee', lineWidth: 2 };
+    const c = sf.cam.toScreen(120, 80);
+    a.store.add(box, 'x');
+    reset();
+    a.setSelection([]);
+    it.onDown(T(c.x, c.y, 1));
+    r.grabbedIt = !!it.action && (it.action.type === 'move' || it.action.type === 'draw');
+    it.onUp(T(c.x, c.y, 0));
+
+    // --- and turning it back on gives the finger its ink back ---
+    reset();
+    a.settings.inkWithFinger = 'yes';
+    r.saysItDraws = a.fingerInks === true;
+    const before = a.store.doc.order.length;
+    it.onDown(T(500, 500, 1));
+    for (let i = 1; i <= 6; i++) it.onMove(T(500 + i * 11, 500 + i * 5, 1));
+    it.onUp(T(566, 530, 0));
+    r.fingerInkedAgain = a.store.doc.order.length === before + 1;
+
+    // --- the toolbar button flips it, and the guess stops guessing ---
+    a.settings.inkWithFinger = 'auto';
+    a.toggleFingerInk();
+    r.toggleIsExplicit = a.settings.inkWithFinger !== 'auto';
+
+    delete a.settings.inkWithFinger;
+    reset();
+    a.setSelection([]);
+    a.store.load(backup);
+    a.setTool('select'); a.settings.autosave = true;
+    return r;
+  `);
+  check('a finger set to move the board moves it, and leaves no ink',
+    fingerPan.saysItMoves && fingerPan.boardMoved && fingerPan.noInkFromFinger,
+    JSON.stringify(fingerPan));
+  check('the pen still draws while the finger is moving the board', fingerPan.penStillInks);
+  check('two fingers still pinch to zoom', fingerPan.pinching && fingerPan.pinchZoomed);
+  check('and a finger can still get hold of an object without the toolbar', fingerPan.grabbedIt);
+  check('turning it back on gives the finger its ink back',
+    fingerPan.saysItDraws && fingerPan.fingerInkedAgain);
+  check('flipping it by hand stops the automatic guess', fingerPan.toggleIsExplicit);
+  check('the floating bar is showing while something is selected', tapped.barWasShowing);
+  check('a tap on empty space puts that bar away instead of leaving a dot',
+    tapped.dismissNoInk && tapped.dismissCleared && tapped.barPutAway);
+
+  /*
+   * Press and hold to pick something up.
+   *
+   * A finger DRAG has to keep drawing - writing on an imported slide with a
+   * fingertip is most of what a tablet is for, and slides are objects like any
+   * other, so "drag moves things" would drag the lesson around instead of
+   * annotating it. Holding still is the one gesture that cannot be mistaken for
+   * drawing or panning.
+   */
+  const held = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    const camWas = { x: sf.cam.x, y: sf.cam.y, z: sf.cam.z };
+    const pagesWere = a.store.doc.pages;
+    a.store.doc.pages = [];
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.penSeenThisSession = false;
+    const rect = sf.canvas.getBoundingClientRect();
+    const at = (x, y) => { const p = sf.cam.toScreen(x, y);
+      return { clientX: rect.left + p.x, clientY: rect.top + p.y }; };
+    const mk = (x, y, buttons, type) => ({ pointerId: 9, pointerType: type || 'touch', button: 0,
+      buttons, shiftKey: false, altKey: false, pressure: 0.5, ...at(x, y) });
+    const strokes = () => a.store.objects.filter((o) => o.type === 'stroke').length;
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    a.store.add({ id: 'hold-note', type: 'note', x: 8000, y: 8000, w: 200, h: 200,
+      color: '#ffd94a', text: 'hold me', rotation: 0, align: 'center', font: 'ui' });
+    a.setTool('pen');
+    const inkBefore = strokes();
+    const r = {};
+
+    // hold still, then drag
+    it.action = null; it.pointers.clear();
+    it.onDown(mk(8100, 8100, 1));
+    await wait(650);
+    r.becameAMove = !!it.action && it.action.type === 'move';
+    r.gotSelected = a.selected.length === 1 && a.selected[0].id === 'hold-note';
+    it.onMove(mk(8400, 8250, 1));
+    it.onUp(mk(8400, 8250, 0));
+    const moved = a.store.doc.objects['hold-note'];
+    r.actuallyMoved = Math.round(moved.x) === 8300 && Math.round(moved.y) === 8150;
+    r.leftNoInk = strokes() === inkBefore;
+
+    // a drag that sets off straight away is a stroke, not a hold
+    a.setTool('pen'); a.setSelection([]); it.action = null; it.pointers.clear();
+    const wasAt = { x: moved.x, y: moved.y };
+    it.onDown(mk(8320, 8170, 1));
+    for (let i = 1; i <= 8; i++) it.onMove(mk(8320 + i * 25, 8170 + i * 12, 1));
+    await wait(650);
+    it.onUp(mk(8520, 8266, 0));
+    r.dragStillDraws = strokes() === inkBefore + 1;
+    r.dragDidNotMoveIt = moved.x === wasAt.x && moved.y === wasAt.y;
+
+    // A stylus holds too, but it waits longer than a finger. Half a second of
+    // stillness is somebody about to write; a deliberate press is longer.
+    const penNote = a.store.doc.objects['hold-note'];
+    a.setTool('pen'); a.setSelection([]); it.action = null; it.pointers.clear();
+    a.notePenSeen();
+    it.onDown(mk(penNote.x + 60, penNote.y + 60, 1, 'pen'));
+    await wait(560);
+    r.penStillWritingAt560 = !!it.action && it.action.type === 'draw';
+    await wait(320);
+    r.penPicksUpEventually = !!it.action && it.action.type === 'move'
+      && a.selected.length === 1 && a.selected[0].id === 'hold-note';
+    it.onUp(mk(penNote.x + 60, penNote.y + 60, 0, 'pen'));
+
+    a.store.doc.pages = pagesWere;
+    a.store.remove(a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id));
+    sf.cam.x = camWas.x; sf.cam.y = camWas.y; sf.cam.z = camWas.z;
+    a.penSeenThisSession = false; a.setTool('select'); a.setSelection([]);
+    it.action = null; it.pointers.clear();
+    return r;
+  `);
+  check('holding a finger still on a note picks it up instead of drawing',
+    held.becameAMove && held.gotSelected && held.leftNoInk);
+  check('and dragging then actually moves it', held.actuallyMoved);
+  check('while a finger that sets off straight away still draws',
+    held.dragStillDraws && held.dragDidNotMoveIt);
+  check('a stylus pausing mid-word is still writing, not picking things up',
+    held.penStillWritingAt560);
+  check('but a stylus held on purpose picks the object up like a finger does',
+    held.penPicksUpEventually);
+
+  /*
+   * Android raises a contextmenu event after about half a second of holding -
+   * the same half second that now means "pick this up". Both fired, so every
+   * attempt to move a note ended with the menu sitting on top of the note.
+   * A finger gets the pick-up; a mouse or a pen keeps the menu.
+   */
+  const menus = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    a.store.add({ id: 'menu-note', type: 'note', x: 9000, y: 9000, w: 200, h: 200,
+      color: '#ffd94a', text: 'menu', rotation: 0, align: 'center', font: 'ui' });
+    a.setSelection(['menu-note']);
+    const rect = sf.canvas.getBoundingClientRect();
+    const p = sf.cam.toScreen(9100, 9100);
+    const menuUp = () => {
+      const m = document.querySelector('.pop, #contextMenu, .menu');
+      return !!m && m.isConnected;
+    };
+    const fire = (type) => {
+      it._lastDownType = type;
+      sf.canvas.dispatchEvent(new MouseEvent('contextmenu',
+        { bubbles: true, cancelable: true, clientX: rect.left + p.x, clientY: rect.top + p.y }));
+    };
+    a.hideMenus();
+    fire('touch');
+    await new Promise((r) => setTimeout(r, 80));
+    const afterFinger = menuUp();
+    a.hideMenus();
+    fire('mouse');
+    await new Promise((r) => setTimeout(r, 80));
+    const afterMouse = menuUp();
+    a.hideMenus();
+
+    a.store.remove(a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id));
+    a.setSelection([]);
+    return { afterFinger, afterMouse };
+  `);
+  check('a finger holding still does not also raise the right-click menu',
+    menus.afterFinger === false);
+  check('while a mouse still gets it, because that is what a right-click is for',
+    menus.afterMouse === true);
+
   /* ---- ruler ---- */
   await js(`window.app.command('ruler'); window.app.ruler.angle = 0.35;`);
   check('ruler toggles', await js(`return window.app.ruler.visible;`));
+
+  /*
+   * A ruler has to hold the line for a hand that shakes - that is the entire
+   * job. The snap used to be decided per point, so a wobble wider than 26
+   * pixels put the ink back wherever the hand was and left a straight line with
+   * a bulge in it. Nothing on screen shows where that boundary is, so it read
+   * as the ruler randomly letting go.
+   *
+   * The stroke below starts against the edge and then wanders a long way off
+   * it, which is what an unsteady hand does. Every point has to land on the
+   * line anyway.
+   */
+  const ruled = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    // The board carries work from earlier tests. Note what is on it, draw on
+    // top, and take only the new strokes away again at the end.
+    const had = new Set(a.store.objects.map((o) => o.id));
+    const camWas = { x: sf.cam.x, y: sf.cam.y, z: sf.cam.z };
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.ruler.visible = true; a.ruler.snap = true;
+    a.ruler.x = 0; a.ruler.y = 0; a.ruler.angle = 0; a.ruler.length = 1200;
+    a.setTool('pen');
+    it.action = null; it.actionId = null; it.pointers.clear();
+    const rect = sf.canvas.getBoundingClientRect();
+    // The ruler lies along y = 0 in board coordinates; find the screen row for it.
+    const onLine = (x) => sf.cam.toScreen(x, 0);
+    const mk = (p, buttons) => ({ pointerId: 1, pointerType: 'pen', button: 0, buttons,
+      clientX: rect.left + p.x, clientY: rect.top + p.y, shiftKey: false, altKey: false, pressure: 0.5 });
+
+    const start = onLine(-300);
+    it.onDown(mk(start, 1));
+    // now wander: 4, then 30, then 120 pixels off the edge and back
+    for (const [x, off] of [[-200, 4], [-100, 30], [0, 120], [100, 45], [200, 3]]) {
+      const p = onLine(x); it.onMove(mk({ x: p.x, y: p.y + off }, 1));
+    }
+    const endp = onLine(260);
+    it.onUp(mk(endp, 0));
+
+    const ink = a.store.objects.filter((o) => o.type === 'stroke').pop();
+    const worst = ink ? Math.max(...ink.points.map((q) => Math.abs(q.y))) : -1;
+    const spread = ink ? Math.max(...ink.points.map((q) => q.x)) - Math.min(...ink.points.map((q) => q.x)) : 0;
+
+    // Same wander with snapping switched off must NOT be straightened - the
+    // setting has to still mean something.
+    a.ruler.snap = false;
+    it.action = null; it.pointers.clear();
+    const s2 = onLine(-300);
+    it.onDown(mk(s2, 1));
+    const w = onLine(0);
+    it.onMove(mk({ x: w.x, y: w.y + 120 }, 1));
+    it.onUp(mk({ x: w.x, y: w.y + 120 }, 0));
+    const free = a.store.objects.filter((o) => o.type === 'stroke').pop();
+    const freeWorst = free ? Math.max(...free.points.map((q) => Math.abs(q.y))) : -1;
+
+    a.ruler.snap = true; a.ruler.visible = false;
+    const mine = a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id);
+    if (mine.length) a.store.remove(mine);
+    sf.cam.x = camWas.x; sf.cam.y = camWas.y; sf.cam.z = camWas.z;
+    it.action = null; it.pointers.clear();
+    return { worst, spread, points: ink ? ink.points.length : 0, freeWorst,
+             leftBehind: a.store.objects.filter((o) => !had.has(o.id)).length };
+  `);
+  check('a stroke that starts on the ruler stays on it however much the hand wanders',
+    ruled.worst >= 0 && ruled.worst < 0.5, `furthest point was ${ruled.worst?.toFixed?.(2)} off the line`);
+  check('and it is a real line, not a dot pinned to one spot',
+    ruled.points > 3 && ruled.spread > 400, `${ruled.points} points across ${Math.round(ruled.spread)}`);
+  check('with snapping switched off the same wander is left exactly as drawn',
+    ruled.freeWorst > 50, `wandered ${Math.round(ruled.freeWorst)}`);
+  /*
+   * A ruler has two long sides and people use both - rotating it is how you
+   * choose which side the line comes out of. Only the near one used to draw,
+   * because the snap band was measured from the ruler's anchor line, which IS
+   * that edge; the far side sat a whole thickness away and caught nothing. And
+   * between the two there was a corridor where ink stayed free, which came out
+   * as pencil lines running under the plastic.
+   */
+  const bothEdges = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    const camWas = { x: sf.cam.x, y: sf.cam.y, z: sf.cam.z };
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.ruler.visible = true; a.ruler.snap = true;
+    a.ruler.x = 0; a.ruler.y = 0; a.ruler.angle = 0; a.ruler.length = 1200;
+    const TH = a.ruler.thickness;
+    a.setTool('pen');
+    it.action = null; it.actionId = null; it.pointers.clear();
+    const rect = sf.canvas.getBoundingClientRect();
+    const at = (x, y) => { const p = sf.cam.toScreen(x, y);
+      return { x: rect.left + p.x, y: rect.top + p.y }; };
+    const mk = (p, buttons) => ({ pointerId: 1, pointerType: 'pen', button: 0, buttons,
+      clientX: p.x, clientY: p.y, shiftKey: false, altKey: false, pressure: 0.5 });
+    const draw = (pts) => {
+      it.action = null; it.pointers.clear();
+      it.onDown(mk(at(pts[0][0], pts[0][1]), 1));
+      for (const [x, y] of pts.slice(1)) it.onMove(mk(at(x, y), 1));
+      const last = pts[pts.length - 1];
+      it.onUp(mk(at(last[0], last[1]), 0));
+      return a.store.objects.filter((o) => o.type === 'stroke').pop();
+    };
+    const spread = (o, key) => Math.max(...o.points.map((q) => q[key]))
+      - Math.min(...o.points.map((q) => q[key]));
+
+    // 1. along the FAR edge, with a wobble
+    const far = draw([[-300, TH], [-150, TH + 22], [0, TH - 30], [150, TH + 14], [280, TH]]);
+    const farOff = Math.max(...far.points.map((q) => Math.abs(q.y - TH)));
+
+    // 2. along the NEAR edge, unchanged behaviour
+    const near = draw([[-300, 0], [-150, 25], [0, -18], [200, 6]]);
+    const nearOff = Math.max(...near.points.map((q) => Math.abs(q.y)));
+
+    // 3. straight up the middle of the plastic: nothing may stay loose there
+    const mid = draw([[-250, TH * 0.5 - 6], [-100, TH * 0.5], [100, TH * 0.5 + 5], [250, TH * 0.5]]);
+    const midEdges = new Set(mid.points.map((q) => (Math.abs(q.y) < 0.5 ? 'near'
+      : Math.abs(q.y - TH) < 0.5 ? 'far' : 'loose')));
+
+    // 4. a stroke that merely CROSSES the ruler must be let go again, or a
+    //    circle drawn over it would come out as a straight line
+    const across = draw([[0, -400], [0, -60], [0, TH / 2], [0, 300], [40, 620]]);
+    const crossEnd = across.points[across.points.length - 1];
+
+    a.ruler.visible = false;
+    const mine = a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id);
+    if (mine.length) a.store.remove(mine);
+    sf.cam.x = camWas.x; sf.cam.y = camWas.y; sf.cam.z = camWas.z;
+    it.action = null; it.pointers.clear();
+    return { farOff, farSpread: spread(far, 'x'), nearOff,
+             midEdges: [...midEdges], crossEndY: crossEnd.y, crossEndX: crossEnd.x,
+             leftBehind: a.store.objects.filter((o) => !had.has(o.id)).length };
+  `);
+  check('the far side of the ruler draws a straight line too, not just the near one',
+    bothEdges.farOff < 0.5 && bothEdges.farSpread > 400,
+    `worst ${bothEdges.farOff?.toFixed?.(2)} off, across ${Math.round(bothEdges.farSpread)}`);
+  check('and the near side still does',
+    bothEdges.nearOff < 0.5, `worst ${bothEdges.nearOff?.toFixed?.(2)} off`);
+  check('ink cannot be left loose under the plastic - it goes to a side',
+    !bothEdges.midEdges.includes('loose'), bothEdges.midEdges.join(', '));
+  check('but a line drawn ACROSS the ruler is let go on the far side',
+    bothEdges.crossEndY > 500, `ended at y ${Math.round(bothEdges.crossEndY)}`);
+  check('and that stroke leaves the board as it found it',
+    bothEdges.leftBehind === 0, `${bothEdges.leftBehind} stray object(s)`);
+
+  /*
+   * You reach for a ruler while holding a pen, which is exactly when it could
+   * not be moved: dragging the body worked only under the Select or Pan tool,
+   * so a pen press on it drew a line instead. Moving the thing meant putting
+   * the pen down, changing tool, dragging, and changing back - while the toast
+   * said "drag to move". So there is a grip in the middle now, and it means
+   * move whatever is in your hand.
+   */
+  const grip = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    const camWas = { x: sf.cam.x, y: sf.cam.y, z: sf.cam.z };
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.ruler.visible = true; a.ruler.snap = true;
+    a.ruler.x = 0; a.ruler.y = 0; a.ruler.angle = 0; a.ruler.length = 1200;
+    const TH = a.ruler.thickness;
+    a.setTool('pen');
+    it.action = null; it.actionId = null; it.pointers.clear();
+    const rect = sf.canvas.getBoundingClientRect();
+    const at = (x, y) => { const p = sf.cam.toScreen(x, y);
+      return { x: rect.left + p.x, y: rect.top + p.y }; };
+    const mk = (p, buttons, type) => ({ pointerId: 1, pointerType: type || 'pen', button: 0, buttons,
+      clientX: p.x, clientY: p.y, shiftKey: false, altKey: false, pressure: 0.5 });
+    const strokes = () => a.store.objects.filter((o) => o.type === 'stroke').length;
+
+    // 1. the grip, with the PEN tool live: it moves and draws nothing
+    const inkBefore = strokes();
+    it.onDown(mk(at(0, TH / 2), 1));
+    it.onMove(mk(at(140, TH / 2 + 70), 1));
+    it.onUp(mk(at(140, TH / 2 + 70), 0));
+    const movedBy = { dx: Math.round(a.ruler.x), dy: Math.round(a.ruler.y) };
+    const drewNothing = strokes() === inkBefore;
+
+    a.ruler.x = 0; a.ruler.y = 0;
+    it.action = null; it.pointers.clear();
+
+    // 2. the body away from the grip, same pen: that still draws
+    it.onDown(mk(at(300, TH / 2), 1));
+    it.onMove(mk(at(420, TH / 2), 1));
+    it.onUp(mk(at(420, TH / 2), 0));
+    const bodyStillDraws = strokes() === inkBefore + 1;
+    const rulerStayed = a.ruler.x === 0 && a.ruler.y === 0;
+
+    it.action = null; it.pointers.clear();
+
+    // 3. a finger anywhere on it moves it - that is the hand a ruler is held with
+    it.onDown(mk(at(300, TH / 2), 1, 'touch'));
+    it.onMove(mk(at(300, TH / 2 + 90), 1, 'touch'));
+    it.onUp(mk(at(300, TH / 2 + 90), 0, 'touch'));
+    const touchMoved = Math.round(a.ruler.y);
+
+    a.ruler.visible = false; a.ruler.x = 0; a.ruler.y = 0;
+    const mine = a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id);
+    if (mine.length) a.store.remove(mine);
+    sf.cam.x = camWas.x; sf.cam.y = camWas.y; sf.cam.z = camWas.z;
+    it.action = null; it.pointers.clear();
+    return { movedBy, drewNothing, bodyStillDraws, rulerStayed, touchMoved,
+             leftBehind: a.store.objects.filter((o) => !had.has(o.id)).length };
+  `);
+  check('the ruler can be dragged by its grip with the pen tool in hand',
+    grip.movedBy.dx === 140 && grip.movedBy.dy === 70,
+    `moved to ${grip.movedBy.dx},${grip.movedBy.dy}`);
+  check('and that drag leaves no ink behind it', grip.drewNothing);
+  check('while pressing the ruler anywhere else still draws, as it must',
+    grip.bodyStillDraws && grip.rulerStayed);
+  check('and a finger on it moves it, whatever the tool',
+    grip.touchMoved === 90, `y is ${grip.touchMoved}`);
+  check('none of which leaves anything on the board',
+    grip.leftBehind === 0, `${grip.leftBehind} stray object(s)`);
+
+  /*
+   * Turning it.
+   *
+   * The blue knob was painted 14px in from the end and the thing that listened
+   * for a press sat 14px further out, centred on the end of the ruler itself.
+   * Half the dot you were aiming at did nothing and the half that worked was
+   * invisible - survivable with a mouse, hopeless with a fingertip, and on a
+   * phone the only other way to turn it was a scroll wheel that isn't there.
+   * There is a knob at each end now, because a ruler is usually longer than a
+   * phone screen and the end in view has to be the one you can turn it by.
+   */
+  const knob = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    const camWas = { x: sf.cam.x, y: sf.cam.y, z: sf.cam.z };
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.ruler.visible = true;
+    a.ruler.x = 0; a.ruler.y = 0; a.ruler.angle = 0; a.ruler.length = 1200;
+    const TH = a.ruler.thickness, INSET = 14;
+    a.setTool('pen');
+    it.action = null; it.actionId = null; it.pointers.clear();
+    const rect = sf.canvas.getBoundingClientRect();
+    const at = (x, y) => { const p = sf.cam.toScreen(x, y);
+      return { x: rect.left + p.x, y: rect.top + p.y }; };
+    const mk = (p, buttons, type) => ({ pointerId: 1, pointerType: type || 'pen', button: 0, buttons,
+      clientX: p.x, clientY: p.y, shiftKey: false, altKey: false, pressure: 0.5 });
+    const zoneAt = (x, y) => it.rulerZone(sf.cam.toScreen(x, y));
+
+    // the knob you can actually see, at both ends
+    const rightKnob = zoneAt(600 - INSET, TH / 2);
+    const leftKnob = zoneAt(-600 + INSET, TH / 2);
+    // and the middle is still the move grip, not a turn
+    const middle = zoneAt(0, TH / 2);
+
+    // dragging the RIGHT knob down turns it clockwise
+    it.onDown(mk(at(600 - INSET, TH / 2), 1));
+    it.onMove(mk(at(600, 600), 1));
+    it.onUp(mk(at(600, 600), 0));
+    const rightDeg = Math.round((a.ruler.angle * 180) / Math.PI);
+
+    // grabbing the LEFT knob and pulling it down must not spin it half a turn
+    a.ruler.angle = 0; it.action = null; it.pointers.clear();
+    it.onDown(mk(at(-600 + INSET, TH / 2), 1));
+    it.onMove(mk(at(-600, 600), 1));
+    it.onUp(mk(at(-600, 600), 0));
+    const leftDeg = Math.round((a.ruler.angle * 180) / Math.PI);
+
+    a.ruler.visible = false; a.ruler.angle = 0;
+    sf.cam.x = camWas.x; sf.cam.y = camWas.y; sf.cam.z = camWas.z;
+    it.action = null; it.pointers.clear();
+    return { rightKnob, leftKnob, middle, rightDeg, leftDeg };
+  `);
+  check('the turning knob answers where it is drawn, at both ends',
+    knob.rightKnob === 'rotate' && knob.leftKnob === 'rotate',
+    `right ${knob.rightKnob}, left ${knob.leftKnob}`);
+  check('and the middle of the ruler still means move, not turn',
+    knob.middle === 'move', `middle is ${knob.middle}`);
+  check('pulling the near knob down turns the ruler clockwise',
+    knob.rightDeg === 45, `${knob.rightDeg}°`);
+  // The far end goes down, so the ruler tilts the other way: -45, not 135.
+  // Without the flip it would swing round and put the end you are holding on
+  // the opposite side of the board from your finger.
+  check('and the far knob follows the finger instead of jumping across the board',
+    knob.leftDeg === 315, `${knob.leftDeg}°`);
+
+  /*
+   * Nothing is drawn UNDER the plastic.
+   *
+   * A stroke that crosses the ruler is deliberately not held to an edge - you
+   * are crossing it, not tracing it - but it was joining up through the middle,
+   * so a line dragged over the ruler came out drawn straight through the body
+   * of it. The ruler stays see-through, as a plastic one is; what changes is
+   * that the nib cannot reach the paper underneath. The line stops at the near
+   * edge and starts again at the far one, and the two halves go in together so
+   * one undo still takes the whole thing back.
+   */
+  const through = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    const camWas = { x: sf.cam.x, y: sf.cam.y, z: sf.cam.z };
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.ruler.visible = true; a.ruler.snap = true;
+    a.ruler.x = 0; a.ruler.y = 0; a.ruler.angle = 0; a.ruler.length = 1200;
+    const TH = a.ruler.thickness;
+    a.setTool('pen');
+    it.action = null; it.actionId = null; it.pointers.clear();
+    const rect = sf.canvas.getBoundingClientRect();
+    const at = (x, y) => { const p = sf.cam.toScreen(x, y);
+      return { x: rect.left + p.x, y: rect.top + p.y }; };
+    const mk = (p, buttons) => ({ pointerId: 1, pointerType: 'pen', button: 0, buttons,
+      clientX: p.x, clientY: p.y, shiftKey: false, altKey: false, pressure: 0.5 });
+
+    const undoWas = a.store.undoStack.length;
+    // a wandering line that starts well above the ruler and ends well below it
+    it.onDown(mk(at(-260, -320), 1));
+    for (let i = 1; i <= 60; i++) {
+      const t = i / 60;
+      it.onMove(mk(at(-260 + t * 520, -320 + t * 700 + Math.sin(t * 9) * 18), 1));
+    }
+    it.onUp(mk(at(260, 380), 0));
+
+    const made = a.store.objects.filter((o) => !had.has(o.id));
+    const pts = made.flatMap((o) => o.points);
+    const inside = pts.filter((q) => {
+      const { along, perp } = it.rulerOffsets(q);
+      return Math.abs(along) <= 600 && perp > 0.5 && perp < TH - 0.5;
+    }).length;
+    const above = pts.filter((q) => it.rulerOffsets(q).perp < 0).length;
+    const below = pts.filter((q) => it.rulerOffsets(q).perp > TH).length;
+
+    // one undo must take the whole line back, both halves at once
+    const undoneBy = a.store.undoStack.length - undoWas;
+    a.store.undo();
+    const leftAfterUndo = a.store.objects.filter((o) => !had.has(o.id)).length;
+
+    a.ruler.visible = false;
+    const mine = a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id);
+    if (mine.length) a.store.remove(mine);
+    sf.cam.x = camWas.x; sf.cam.y = camWas.y; sf.cam.z = camWas.z;
+    it.action = null; it.pointers.clear(); sf.wetPieces = null;
+    return { pieces: made.length, inside, above, below, undoneBy, leftAfterUndo };
+  `);
+  check('a line dragged across the ruler leaves no ink under the plastic',
+    through.inside === 0, `${through.inside} point(s) under the body`);
+  check('and comes out as two marks, one each side, not one drawn through it',
+    through.pieces === 2 && through.above > 3 && through.below > 3,
+    `${through.pieces} stroke(s), ${through.above} above and ${through.below} below`);
+  check('both halves go in together, so one undo takes the whole line back',
+    through.undoneBy === 1 && through.leftAfterUndo === 0,
+    `${through.undoneBy} history entr(ies), ${through.leftAfterUndo} left after undo`);
+
+
+  check('and the test board is handed back exactly as it was found',
+    ruled.leftBehind === 0, `${ruled.leftBehind} stray object(s)`);
 
   await sleep(400);
   await shot(win, '01-board');
@@ -2325,7 +3892,320 @@ async function run(win, app) {
     const r = await insertDocument(window.app, ${JSON.stringify(path.join(FIX, 'sample.pdf'))}, { pages: [1, 2, 3] });
     return { added: window.app.store.count - before, ok: !!r };
   `);
+  /*
+   * The box you type into.
+   *
+   * Two things were wrong with it and both showed up the moment anybody used
+   * it. It was an opaque white panel with a heavy accent border, rounded
+   * corners and a drop shadow - so it hid the shape or the board behind it,
+   * and what you looked at while typing was not what you got when you stopped.
+   * And it kept the height it was created with, so the second line pushed the
+   * first one out of sight and you carried on typing into a box that scrolled.
+   */
+  const textBox = await js(`
+    const a = window.app, te = a.textEditor;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    const r = {};
+
+    // ---- writing something new ----
+    a.addTextAt({ x: 400, y: 400 });
+    const box = a.store.objects.filter((o) => o.type === 'text').pop();
+    r.opened = te.active;
+    const startH = box.h;
+
+    const style = () => getComputedStyle(te.el);
+    r.seeThrough = ['transparent', 'rgba(0, 0, 0, 0)'].includes(style().backgroundColor);
+    r.noHeavyBorder = parseFloat(style().borderTopWidth || '0') === 0;
+    r.noShadow = (style().boxShadow || 'none') === 'none';
+    r.framed = (style().outlineStyle || '') === 'dashed';
+
+    // Type enough to need several lines, the way input would.
+    te.el.value = 'One two three four five six seven eight nine ten eleven twelve '
+      + 'thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty '
+      + 'twenty-one twenty-two twenty-three twenty-four twenty-five';
+    te.place();
+    r.grewWhileTyping = box.h > startH;
+    // Nothing has scrolled away: the whole of it is visible in the box.
+    r.notScrolled = te.el.scrollTop === 0 && te.el.scrollHeight <= te.el.clientHeight + 2;
+    te.commit();
+    const afterWriting = box.h;
+    r.keptTheGrowth = afterWriting > startH;
+
+    // ---- coming back to EDIT it later ----
+    a.beginTextEdit(box);
+    r.reopened = te.active;
+    const beforeEdit = box.h;
+    te.el.value = te.el.value + ' and then a good deal more text again, several more lines of it, '
+      + 'so the box has to find room for all of it while it is being typed rather than after.';
+    te.place();
+    r.grewWhileEditing = box.h > beforeEdit;
+    r.notScrolledOnEdit = te.el.scrollTop === 0 && te.el.scrollHeight <= te.el.clientHeight + 2;
+    te.commit();
+
+    // ---- one undo puts back the height it had before that edit ----
+    a.store.undo();
+    r.undoneToBeforeEdit = Math.abs(a.store.doc.objects[box.id].h - beforeEdit) < 1.5;
+    r.undoneH = Math.round(a.store.doc.objects[box.id].h);
+    r.beforeEdit = Math.round(beforeEdit);
+
+    a.store.remove(a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id));
+    a.setTool('select');
+    return r;
+  `);
+  check('a new text box opens with a see-through, unframed panel like any other text box',
+    textBox.opened && textBox.seeThrough && textBox.noHeavyBorder && textBox.noShadow,
+    `background ${textBox.seeThrough}, border ${textBox.noHeavyBorder}, shadow ${textBox.noShadow}`);
+  check('with a thin dashed frame around it rather than a heavy one through it',
+    textBox.framed);
+  check('it grows as you write instead of scrolling the first line out of sight',
+    textBox.grewWhileTyping && textBox.notScrolled);
+  check('and keeps that size once you stop', textBox.keptTheGrowth);
+
+  /*
+   * And it has to come back down. Growing but not shrinking left a tall empty
+   * box after you deleted a paragraph - and the box snapped smaller anyway the
+   * moment you clicked away, because that is what commit has always done. A
+   * jump at the end is worse than movement while typing.
+   */
+  const shrink = await js(`
+    const a = window.app, te = a.textEditor;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    const r = {};
+
+    // ---- a text box ----
+    a.addTextAt({ x: 1200, y: 400 });
+    const box = a.store.objects.filter((o) => o.type === 'text').pop();
+    const oneLine = box.h;
+    a.beginTextEdit(box);
+    te.el.value = 'One two three four five six seven eight nine ten eleven twelve thirteen '
+      + 'fourteen fifteen sixteen seventeen eighteen nineteen twenty twenty-one';
+    te.place();
+    r.textGrew = box.h > oneLine;
+    const tall = box.h;
+    te.el.value = 'One two';                      // backspace it all away
+    te.place();
+    r.textShrank = box.h < tall;
+    r.textBackToOneLine = Math.abs(box.h - oneLine) < 1.5;
+    te.commit();
+    r.textNoJumpOnCommit = Math.abs(box.h - oneLine) < 1.5;
+
+    // ---- a sticky note ----
+    a.addNoteAt({ x: 1600, y: 400 });
+    const note = a.store.objects.filter((o) => o.type === 'note').pop();
+    const noteStart = note.h;
+    // A note shrinks its TEXT first and only grows when even the smallest type
+    // will not fit, so this has to be genuinely long to make the note itself move.
+    te.el.value = ('A paragraph long enough that even the smallest type will not fit it '
+      + 'inside the square this note started as. ').repeat(30);
+    te.place();
+    r.noteGrew = note.h > noteStart;
+    te.el.value = 'short';
+    te.place();
+    r.noteShrank = note.h === noteStart;          // back to where it began
+    te.el.value = '';
+    te.place();
+    r.noteNeverSmallerThanItWas = note.h === noteStart;
+    te.cancel();
+
+    a.store.remove(a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id));
+    a.setTool('select');
+    return r;
+  `);
+  check('a text box comes back down when you delete the text again',
+    shrink.textGrew && shrink.textShrank && shrink.textBackToOneLine);
+  check('and does not jump to a different size when you click away',
+    shrink.textNoJumpOnCommit);
+  check('a sticky note shrinks back too, but never below the size it started at',
+    shrink.noteGrew && shrink.noteShrank && shrink.noteNeverSmallerThanItWas,
+    `grew ${shrink.noteGrew}, shrank ${shrink.noteShrank}, floor ${shrink.noteNeverSmallerThanItWas}`);
+
+  /*
+   * A note made while the board is zoomed out has to look like a note made at
+   * 100%, type included.
+   *
+   * Its SIZE always did: the size is chosen in screen pixels and converted to
+   * board units, so at 50% it is twice as many units across and comes out the
+   * same on screen. The type inside it was capped at a flat 46 board units,
+   * which is not a screen measure at all - so the same note with the same words
+   * carried type that changed size with whatever zoom it happened to be made at.
+   */
+  const noteType = await js(`
+    const a = window.app, sf = a.surface;
+    const { noteTypeRange, faceOf } = await import('app://board/js/core/render.js');
+    const { fitFontSize } = await import('app://board/js/core/util.js');
+    const had = new Set(a.store.objects.map((o) => o.id));
+    const probe = document.createElement('canvas').getContext('2d');
+    const made = [];
+    // 0.05 is the furthest the board zooms out and 8 the furthest in.
+    for (const z of [0.05, 0.1, 0.25, 0.5, 1, 1.1, 2, 8]) {
+      sf.cam.z = z;
+      a.addNoteAt({ x: 30000 + made.length * 9000, y: 30000 });
+      const n = a.store.objects.filter((o) => o.type === 'note').pop();
+      a.textEditor.el.value = 'Sticky note';
+      a.textEditor.commit();
+      // Exactly what the renderer will choose for it, put back into screen
+      // pixels - which is the only place a person can judge type size.
+      const pad = Math.max(10, n.w * 0.08);
+      const range = noteTypeRange(n);
+      const size = fitFontSize(probe, n.text, n.w - pad * 2, n.h - pad * 2,
+        faceOf(n.font), '400', range.max, range.min);
+      made.push({ z, onScreen: Math.round(size * z * 10) / 10, wide: Math.round(n.w * z) });
+    }
+    sf.cam.z = 1;
+    a.store.remove(a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id));
+    a.setTool('select');
+    const at1 = made.find((m) => m.z === 1);
+    return {
+      // Within a tenth. Font sizes are whole board units, so at the extremes of
+      // zoom one unit is worth several screen pixels and the answer can only
+      // land on a nearby step - 6 units at 8x is 48 screen pixels, not 46.
+      sameType: made.every((m) => Math.abs(m.onScreen - at1.onScreen) <= at1.onScreen * 0.1),
+      sameSize: made.every((m) => Math.abs(m.wide - at1.wide) <= 2),
+      at100: at1.onScreen,
+      seen: made.map((m) => m.z + 'x:' + m.onScreen).join('  ')
+    };
+  `);
+  check('a sticky note carries the same size type whatever the board zoom was',
+    noteType.sameType, noteType.seen);
+  check('and is still the same size on screen too', noteType.sameSize);
+  check('with a note made at 100% left exactly as it was',
+    noteType.at100 >= 30, `${noteType.at100}px on screen`);
+  check('coming back to edit it later grows it the same way',
+    textBox.reopened && textBox.grewWhileEditing && textBox.notScrolledOnEdit);
+  check('and one undo puts back the size it had before that edit',
+    textBox.undoneToBeforeEdit, `${textBox.undoneH} vs ${textBox.beforeEdit}`);
+
+  // Re-opening a box with everything highlighted means the next key you press
+  // deletes the lot - fine for replacing, wrong for fixing a word, which is
+  // what re-opening is nearly always for.
+  const caret = await js(`
+    const a = window.app, te = a.textEditor;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    a.addTextAt({ x: 700, y: 700 });
+    const box = a.store.objects.filter((o) => o.type === 'text').pop();
+    te.el.value = 'existing words';
+    te.commit();
+    a.beginTextEdit(box);
+    await new Promise((r) => setTimeout(r, 60));
+    const r = { start: te.el.selectionStart, end: te.el.selectionEnd, len: te.el.value.length };
+    te.cancel();
+    a.store.remove(a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id));
+    a.setTool('select');
+    return r;
+  `);
+  check('re-opening a text box gives you a caret at the end, not the whole thing selected',
+    caret.start === caret.len && caret.end === caret.len,
+    `selection ${caret.start}-${caret.end} of ${caret.len}`);
+
+  /*
+   * One copy of the words, not two.
+   *
+   * The canvas and the textarea both draw the same text in the same place. The
+   * old editor was an opaque white panel, so the canvas copy underneath was
+   * covered up by accident. Making the panel see-through - which is what a
+   * text box should be - uncovered it, and every letter appeared twice, a
+   * pixel or two apart, smeared.
+   */
+  const doubled = await js(`
+    const a = window.app, te = a.textEditor, sf = a.surface;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    const r = {};
+    a.addTextAt({ x: 900, y: 900 });
+    const box = a.store.objects.filter((o) => o.type === 'text').pop();
+    te.el.value = 'words that must not appear twice';
+    te.commit();
+
+    a.beginTextEdit(box);
+    r.marked = !!sf.editing && sf.editing.id === box.id;
+    // What the canvas would actually paint for it right now.
+    const { drawObject } = await import('app://board/js/core/render.js');
+    const probe = document.createElement('canvas').getContext('2d');
+    let drewText = 0;
+    const realFill = probe.fillText.bind(probe);
+    probe.fillText = (...args) => { drewText++; return realFill(...args); };
+    drawObject(probe, box, () => {}, sf.editing);
+    r.silentWhileEditing = drewText === 0;
+
+    te.cancel();
+    r.cleared = sf.editing === null;
+    drewText = 0;
+    drawObject(probe, box, () => {}, sf.editing);
+    r.speaksAgainAfter = drewText > 0;
+
+    a.store.remove(a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id));
+    a.setTool('select');
+    return r;
+  `);
+  check('the canvas stops drawing the words while you are typing them',
+    doubled.marked && doubled.silentWhileEditing);
+  check('and draws them again the moment you stop',
+    doubled.cleared && doubled.speaksAgainAfter);
+
   check('PDF import adds pages', pdf.added === 3, pdf.added + ' pages');
+
+  /*
+   * Where an insert LANDS.
+   *
+   * The rule used to be "eighty pixels right of everything on the board", and
+   * everything includes the far end - a note dragged off to one side an hour
+   * ago, the last page of a PDF imported this morning. The new picture went
+   * beyond all of it, and because the view follows what it just inserted, the
+   * board bolted sideways and left the sentence being written behind.
+   */
+  const dropped = await js(`
+    const a = window.app, sf = a.surface;
+    const { dropOrigin } = await import('app://board/js/insert.js');
+    const had = new Set(a.store.objects.map((o) => o.id));
+    const camWas = { x: sf.cam.x, y: sf.cam.y, z: sf.cam.z };
+    const pagesWere = a.store.doc.pages;
+    a.store.doc.pages = [];                       // a plain canvas, not a pad
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    const view = sf.cam.viewport(sf.width, sf.height);
+    const inView = (o) => o.x + o.w / 2 > view.x - view.w && o.x + o.w / 2 < view.x + 2 * view.w;
+
+    // 1. an empty board puts it in the middle of what you are looking at.
+    // The suite has been building a board for a while, so this hides the
+    // existing objects for one call rather than destroying them.
+    const orderWas = a.store.doc.order.slice();
+    a.store.doc.order = [];
+    const onEmpty = dropOrigin(a, 400, 300);
+    a.store.doc.order = orderWas;
+    const emptyCentred = Math.abs(onEmpty.x + 200 - (view.x + view.w / 2)) < 1
+      && Math.abs(onEmpty.y + 150 - (view.y + view.h / 2)) < 1;
+
+    // 2. writing in the middle of the view, and one stray note miles away
+    const pts = [];
+    for (let i = 0; i <= 40; i++) pts.push({ x: view.x + view.w / 2 - 200 + i * 10, y: view.y + view.h / 2, p: 0.5 });
+    a.store.add({ id: 'drop-ink', type: 'stroke', tool: 'pen', color: '#111', width: 8, effect: 'none',
+      points: pts, bbox: { x: view.x + view.w / 2 - 200, y: view.y + view.h / 2, w: 400, h: 0 }, rotation: 0 });
+    a.store.add({ id: 'drop-far', type: 'note', x: view.x + 9000, y: view.y + 200,
+      w: 200, h: 200, rotation: 0, text: 'miles away', color: '#ffd', fontSize: 16 });
+
+    const spot = dropOrigin(a, 400, 300);
+    const near = Math.round(Math.hypot(spot.x + 200 - (view.x + view.w / 2),
+                                       spot.y + 150 - (view.y + view.h / 2)));
+    const beyondEverything = spot.x > view.x + 9000;
+
+    // 3. and it must not sit on the writing
+    const hits = (r) => r.x < view.x + view.w / 2 + 200 && r.x + 400 > view.x + view.w / 2 - 200
+      && r.y < view.y + view.h / 2 + 1 && r.y + 300 > view.y + view.h / 2;
+    const onTopOfInk = hits(spot);
+
+    a.store.remove(a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id));
+    a.store.doc.pages = pagesWere;
+    sf.cam.x = camWas.x; sf.cam.y = camWas.y; sf.cam.z = camWas.z;
+    return { emptyCentred, near, beyondEverything, onTopOfInk, viewW: Math.round(view.w),
+             left: a.store.objects.filter((o) => !had.has(o.id)).length };
+  `);
+  check('an insert onto an empty board lands in the middle of the view',
+    dropped.emptyCentred);
+  check('and with a stray object miles away it still lands beside your work, not past it',
+    !dropped.beyondEverything && dropped.near < dropped.viewW * 2,
+    `${dropped.near} units from the middle of a ${dropped.viewW}-wide view`);
+  check('without landing on top of what you were writing',
+    !dropped.onTopOfInk);
+  check('and the placement test cleans up after itself',
+    dropped.left === 0, `${dropped.left} stray object(s)`);
 
 
   const docx = await js(`
@@ -2493,6 +4373,762 @@ async function run(win, app) {
     return got;
   `);
   check('all tools selectable', tools.join(',') === 'select,lasso,pen,highlighter,eraser,note,text,shape', tools.join(','));
+
+  /*
+   * Drawing shapes, one after another, without going back to the menu.
+   *
+   * Two things used to get in the way. The tool jumped back to Select after
+   * every shape, so the next drag drew a selection marquee instead of a box and
+   * you had to reopen the menu to get the tool back. And the tap that put that
+   * menu away landed on the board as well, leaving a stray default-sized square
+   * where you were only trying to dismiss something.
+   */
+  const shapes = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    const camWas = { x: sf.cam.x, y: sf.cam.y, z: sf.cam.z };
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    const returnWas = a.settings.returnToSelect;
+    a.settings.returnToSelect = true;          // the setting shapes must ignore
+    a.hideMenus(); a.setSelection([]);
+    it.action = null; it.actionId = null; it.pointers.clear();
+    const rect = sf.canvas.getBoundingClientRect();
+    const at = (x, y) => { const p = sf.cam.toScreen(x, y);
+      return { x: rect.left + p.x, y: rect.top + p.y }; };
+    const mk = (p, buttons) => ({ pointerId: 91, pointerType: 'touch', button: 0, buttons,
+      clientX: p.x, clientY: p.y, shiftKey: false, altKey: false, pressure: 0.5 });
+    const shapesNow = () => a.store.objects.filter((o) => o.type === 'shape').length;
+    const drag = (x0, y0, x1, y1) => {
+      it.action = null; it.pointers.clear();
+      it.onDown(mk(at(x0, y0), 1));
+      it.onMove(mk(at(x1, y1), 1));
+      it.onUp(mk(at(x1, y1), 0));
+    };
+    const tap = (x, y) => {
+      it.action = null; it.pointers.clear();
+      it.onDown(mk(at(x, y), 1));
+      it.onUp(mk(at(x, y), 0));
+    };
+
+    a.setTool('shape');
+    const before = shapesNow();
+
+    // 1. the menu is open; the tap that shuts it must not leave a shape behind
+    a.openToolPopover?.(a, null, 'shape');
+    const { openPopover } = await import('./js/ui/popover.js');
+    openPopover(document.getElementById('toolbar'), document.createElement('div'), { key: 'tool:shape' });
+    tap(9000, 9000);
+    const afterDismiss = shapesNow();
+    const toolAfterDismiss = a.tool;
+
+    // 2. now actually draw one, with no menu open
+    drag(9000, 9000, 9160, 9120);
+    const afterFirst = shapesNow();
+    const toolAfterFirst = a.tool;
+    const selectedFirst = a.selected.length === 1 && a.selected[0].type === 'shape';
+
+    // 3. and another straight away, without touching the menu
+    drag(9300, 9000, 9460, 9120);
+    const afterSecond = shapesNow();
+
+    // 4. a tap with no menu open is still the shortcut for a default-sized one
+    tap(9700, 9000);
+    const afterTap = shapesNow();
+
+    a.settings.returnToSelect = returnWas;
+    a.setTool('select'); a.setSelection([]); a.hideMenus();
+    const mine = a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id);
+    if (mine.length) a.store.remove(mine);
+    sf.cam.x = camWas.x; sf.cam.y = camWas.y; sf.cam.z = camWas.z;
+    it.action = null; it.pointers.clear();
+    return { before, afterDismiss, toolAfterDismiss, afterFirst, toolAfterFirst,
+             selectedFirst, afterSecond, afterTap };
+  `);
+  check('the tap that shuts the shape menu leaves no shape behind',
+    shapes.afterDismiss === shapes.before && shapes.toolAfterDismiss === 'shape',
+    `${shapes.afterDismiss - shapes.before} shape(s), tool ${shapes.toolAfterDismiss}`);
+  check('dragging then draws one, selected and ready to resize',
+    shapes.afterFirst === shapes.before + 1 && shapes.selectedFirst);
+  check('and the shape tool stays put, whatever Return to select says',
+    shapes.toolAfterFirst === 'shape', `tool is ${shapes.toolAfterFirst}`);
+  check('so the next shape needs no trip back to the menu',
+    shapes.afterSecond === shapes.before + 2, `${shapes.afterSecond - shapes.before} shape(s)`);
+  check('and a plain tap still drops a default-sized one',
+    shapes.afterTap === shapes.before + 3, `${shapes.afterTap - shapes.before} shape(s)`);
+
+  /* ---- Escape means never mind ------------------------------------------ */
+  const esc = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    const camWas = { x: sf.cam.x, y: sf.cam.y, z: sf.cam.z };
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.hideMenus(); a.setSelection([]);
+    it.action = null; it.actionId = null; it.pointers.clear();
+    const rect = sf.canvas.getBoundingClientRect();
+    const at = (x, y) => { const p = sf.cam.toScreen(x, y); return { x: rect.left + p.x, y: rect.top + p.y }; };
+    const mk = (p, buttons) => ({ pointerId: 31, pointerType: 'mouse', button: 0, buttons,
+      clientX: p.x, clientY: p.y, shiftKey: false, ctrlKey: false, metaKey: false, altKey: false });
+    const escape = () => a.onKeyDown({ key: 'Escape', preventDefault() {}, ctrlKey: false, metaKey: false, shiftKey: false, code: 'Escape' });
+    const count = (t) => a.store.objects.filter((o) => o.type === t).length;
+    const r = {};
+
+    // 1. a shape being dragged out is abandoned, and leaves nothing behind
+    a.setTool('shape');
+    const shapesWere = count('shape');
+    const undosWere = a.store.undoDepth ?? null;
+    it.onDown(mk(at(4000, 4000), 1));
+    it.onMove(mk(at(4120, 4090), 1));
+    r.midDrag = it.action?.type === 'shapeDraw' && it.pointers.size === 1;
+    escape();
+    r.dragAbandoned = it.action === null;
+    it.onUp(mk(at(4120, 4090), 0));
+    r.nothingAdded = count('shape') === shapesWere;
+
+    // 2. with a tool armed and nothing in flight, Escape puts you back where
+    //    you were - the pen if you were writing, Select if you were not
+    a.setTool('select');
+    a.setTool('note');
+    escape();
+    r.toolPutDown = a.tool === 'select';
+    a.setTool('pen');
+    a.setTool('emoji');
+    escape();
+    r.backToThePen = a.tool === 'pen';
+    a.setTool('highlighter');
+    a.setTool('shape');
+    escape();
+    r.backToTheHighlighter = a.tool === 'highlighter';
+
+    // 3. and otherwise it is about the selection, as before
+    const s1 = a.store.add({ id: 'escA', type: 'shape', kind: 'rect', x: 4300, y: 4000,
+      w: 50, h: 40, rotation: 0, stroke: '#000', fill: '#fff', lineWidth: 2 }, 'test');
+    a.setTool('select');
+    a.setSelection(['escA']);
+    escape();
+    r.selectionCleared = sf.selection.size === 0;
+
+    // a move abandoned halfway puts the object back where it started
+    a.setSelection(['escA']);
+    const xWas = a.store.get('escA').x;
+    it.action = null; it.pointers.clear();
+    it.onDown(mk(at(4320, 4020), 1));
+    it.onMove(mk(at(4600, 4020), 1));
+    r.moved = a.store.get('escA').x !== xWas;
+    escape();
+    r.movePutBack = a.store.get('escA').x === xWas;
+    it.onUp(mk(at(4600, 4020), 0));
+
+    a.setTool('select'); a.setSelection([]); a.hideMenus();
+    const mine = a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id);
+    if (mine.length) a.store.remove(mine);
+    sf.cam.x = camWas.x; sf.cam.y = camWas.y; sf.cam.z = camWas.z;
+    it.action = null; it.pointers.clear();
+    return r;
+  `);
+  check('Escape abandons a shape being dragged out, and adds nothing',
+    esc.midDrag && esc.dragAbandoned && esc.nothingAdded);
+  check('Escape puts down a tool that is armed but has dropped nothing yet',
+    esc.toolPutDown);
+  check('and hands you back what you were using, not always Select',
+    esc.backToThePen && esc.backToTheHighlighter);
+  check('Escape still clears the selection when nothing else is pending',
+    esc.selectionCleared);
+  check('a move abandoned halfway puts the object back where it started',
+    esc.moved && esc.movePutBack);
+
+  /* ---- grouping -------------------------------------------------------- *
+   * A poster made of shapes should move as one thing. Grouping is a shared
+   * name rather than a container, so what is tested here is that selection
+   * widens to the whole group everywhere, that copies get a group of their
+   * own rather than being welded to the original, and that a group can be
+   * opened to work on one piece.
+   */
+  const grp = await js(`
+    const a = window.app, sf = a.surface;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    a.setSelection([]); a.openGroup = null;
+    const mk = (n, x) => a.store.add({ id: 'grp' + n, type: 'shape', kind: 'rect',
+      x, y: 500, w: 40, h: 30, rotation: 0, stroke: '#000', fill: '#ffffff', lineWidth: 2 }, 'test');
+    const parts = [mk('A', 100), mk('B', 200), mk('C', 300)];
+    const loose = mk('D', 900);
+    const r = {};
+
+    // group the first three
+    a.setSelection(['grpA', 'grpB', 'grpC']);
+    r.grouped = a.groupSelection();
+    const gid = a.store.get('grpA').groupId;
+    r.allShareOneName = !!gid && ['grpA','grpB','grpC'].every((id) => a.store.get(id).groupId === gid);
+    r.looseUntouched = !a.store.get('grpD').groupId;
+
+    // touching one member selects the lot
+    a.setSelection([]);
+    a.setSelection(['grpB']);
+    r.oneSelectsAll = a.surface.selection.size === 3;
+
+    // a marquee that catches one member catches the group too
+    a.setSelection([]);
+    a.setSelection(['grpC', 'grpD']);
+    r.marqueeWidens = a.surface.selection.size === 4;
+
+    // moving the selection moves every member
+    a.setSelection(['grpA']);
+    const beforeX = a.store.get('grpB').x;
+    const { translateObject } = await import('./js/core/transform.js');
+    for (const o of a.selected) translateObject(o, 17, 0);
+    r.movesTogether = a.store.get('grpB').x === beforeX + 17;
+
+    // a copy is its own group, not welded to the original
+    a.setSelection(['grpA']);
+    a.duplicate();
+    const copies = a.selected;
+    const copyGid = copies[0]?.groupId;
+    r.copyIsThree = copies.length === 3;
+    r.copyHasOwnName = !!copyGid && copyGid !== gid;
+    r.copyHoldsTogether = copies.every((o) => o.groupId === copyGid);
+    const copyIds = copies.map((o) => o.id);
+    a.store.remove(copyIds);
+
+    // one member can be picked out once the group is opened
+    a.setSelection([]);
+    r.enterReported = a.enterGroup(a.store.get('grpB'));
+    r.insideIsOne = a.surface.selection.size === 1 && [...a.surface.selection][0] === 'grpB';
+    r.openRemembered = a.openGroup === gid;
+    // and the group closes again when something outside it is picked
+    a.setSelection(['grpD']);
+    r.leavingCloses = a.openGroup === null;
+    a.setSelection(['grpA']);
+    r.closedMeansWholeAgain = a.surface.selection.size === 3;
+
+    // grouping something already grouped folds it in rather than nesting
+    a.setSelection(['grpA', 'grpD']);
+    a.groupSelection();
+    const gid2 = a.store.get('grpD').groupId;
+    r.foldsInRatherThanNesting =
+      ['grpA','grpB','grpC','grpD'].every((id) => a.store.get(id).groupId === gid2) && gid2 !== gid;
+
+    // a group can be named, and the name travels with its pieces
+    a.setSelection(['grpA']);
+    r.namedOk = await a.nameGroup('Solar');
+    r.nameOnEveryMember = ['grpA','grpB','grpC','grpD']
+      .every((id) => a.store.get(id).groupName === 'Solar');
+    a.duplicate();
+    const namedCopies = a.selected;
+    r.copyKeepsName = namedCopies.every((o) => o.groupName === 'Solar')
+      && namedCopies[0].groupId !== a.store.get('grpA').groupId;
+    a.store.remove(namedCopies.map((o) => o.id));
+    a.setSelection(['grpA']);
+    r.nameCleared = (await a.nameGroup('')) && a.store.get('grpA').groupName === null;
+    await a.nameGroup('Solar');
+    r.namingNeedsAGroup = (await (async () => {
+      a.setSelection([]);
+      return a.nameGroup('Nope');
+    })()) === false;
+    a.setSelection(['grpA']);
+
+    // ungroup frees every one of them, and takes the name with it
+    a.setSelection(['grpA']);
+    r.ungrouped = a.ungroupSelection();
+    r.allFree = ['grpA','grpB','grpC','grpD'].every((id) => !a.store.get(id).groupId);
+    r.nameWentWithIt = ['grpA','grpB','grpC','grpD'].every((id) => !a.store.get(id).groupName);
+
+    // regrouping the same pieces keeps the name; mixing two named groups drops it
+    a.setSelection(['grpA','grpB']);
+    a.groupSelection();
+    await a.nameGroup('Solar');
+    a.setSelection(['grpC','grpD']);
+    a.groupSelection();
+    await a.nameGroup('Wind');
+    a.setSelection(['grpA']);
+    a.ungroupSelection();
+    a.setSelection(['grpA','grpB']);
+    a.groupSelection();
+    r.regroupForgets = !a.store.get('grpA').groupName;
+    await a.nameGroup('Solar');
+    a.setSelection(['grpA','grpC']);
+    a.groupSelection();
+    r.mixedDropsBothNames = !a.store.get('grpA').groupName && !a.store.get('grpC').groupName;
+    a.setSelection(['grpA']);
+    a.ungroupSelection();
+
+    /*
+     * The case that started this: name a group, break it up, then build a new
+     * group that happens to include one of the old pieces. The new group must
+     * be nameless - both in what is stored and in what gets drawn.
+     */
+    a.setSelection(['grpA','grpB','grpC']);
+    a.groupSelection();
+    await a.nameGroup('Solar');
+    a.setSelection(['grpA']);
+    a.ungroupSelection();
+    a.setSelection(['grpA','grpD']);          // one old piece, one that never was
+    a.groupSelection();
+    r.strayDoesNotResurrect =
+      !a.store.get('grpA').groupName && !a.store.get('grpD').groupName;
+    // and even if a name somehow clung to one piece, it must not be drawn
+    a.store.update('grpA', { groupName: 'Solar' });
+    sf._groupRev = -1;
+    const gidNow = a.store.get('grpA').groupId;
+    const boxes = new Map();
+    for (const o of a.store.objects) {
+      if (o?.groupId !== gidNow) continue;
+      const cur = boxes.get(gidNow);
+      if (!cur) { boxes.set(gidNow, { name: o.groupName || '' }); continue; }
+      if ((o.groupName || '') !== cur.name) cur.name = '';
+    }
+    r.disagreementShowsNoName = boxes.get(gidNow)?.name === '';
+    a.setSelection(['grpA']);
+    a.ungroupSelection();
+
+    // one object is not a group
+    a.setSelection(['grpA']);
+    r.refusesSingle = a.groupSelection() === false;
+
+    // and undo puts a group back
+    a.setSelection(['grpA','grpB']);
+    a.groupSelection();
+    const gid3 = a.store.get('grpA').groupId;
+    a.store.undo();
+    r.undoUngroups = !a.store.get('grpA').groupId && !!gid3;
+
+    a.setSelection([]); a.openGroup = null;
+    const mine = a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id);
+    if (mine.length) a.store.remove(mine);
+    return r;
+  `);
+  check('grouping gives every member one shared name', grp.grouped && grp.allShareOneName);
+  check('and leaves anything outside the selection alone', grp.looseUntouched);
+  check('touching one member selects the whole group', grp.oneSelectsAll);
+  check('a marquee catching one member catches the group', grp.marqueeWidens);
+  check('moving the selection moves every member', grp.movesTogether);
+  check('a duplicate holds together as a group of its own',
+    grp.copyIsThree && grp.copyHasOwnName && grp.copyHoldsTogether);
+  check('a group can be opened to pick out one piece',
+    grp.enterReported && grp.insideIsOne && grp.openRemembered);
+  check('and closes again as soon as something outside is picked',
+    grp.leavingCloses && grp.closedMeansWholeAgain);
+  check('grouping a group folds it in rather than nesting', grp.foldsInRatherThanNesting);
+  check('a group can be given a name, and every member carries it',
+    grp.namedOk && grp.nameOnEveryMember);
+  check('a copy of a named group keeps the name but not the identity', grp.copyKeepsName);
+  check('an empty name clears it rather than storing nothing useful', grp.nameCleared);
+  check('naming with nothing selected is refused, not guessed at', grp.namingNeedsAGroup);
+  check('ungrouping frees every member', grp.ungrouped && grp.allFree);
+  check('and the name goes with the grouping rather than haunting the pieces',
+    grp.nameWentWithIt && grp.regroupForgets);
+  check('folding two named groups together leaves it unnamed rather than guessing',
+    grp.mixedDropsBothNames);
+  check('a new group built from an old piece does not inherit the old name',
+    grp.strayDoesNotResurrect);
+  check('and a name only one member agrees with is not drawn at all',
+    grp.disagreementShowsNoName);
+  check('one object on its own is not a group', grp.refusesSingle);
+  check('undo puts a group back the way it was', grp.undoUngroups);
+
+  /* ---- picking several ------------------------------------------------- */
+  const multi = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    a.setSelection([]); a.openGroup = null; a.multiSelect = false;
+    const camWas = { x: sf.cam.x, y: sf.cam.y, z: sf.cam.z };
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    // Filled, because an unfilled shape is only hittable on its outline - a
+    // click in the hollow middle of one goes straight past it, which is how
+    // this test spent a run clicking through its own rectangles.
+    const mk = (n, x) => a.store.add({ id: 'ms' + n, type: 'shape', kind: 'rect',
+      x, y: 2000, w: 60, h: 40, rotation: 0, stroke: '#000', fill: '#ffffff', lineWidth: 2 }, 'test');
+    ['A','B','C'].forEach((n, i) => mk(n, 2000 + i * 200));
+    const rect = sf.canvas.getBoundingClientRect();
+    const at = (x, y) => { const p = sf.cam.toScreen(x, y); return { x: rect.left + p.x, y: rect.top + p.y }; };
+    const click = (x, y, mods = {}) => {
+      it.action = null; it.pointers.clear();
+      const base = { pointerId: 5, pointerType: 'mouse', button: 0,
+        clientX: at(x, y).x, clientY: at(x, y).y, shiftKey: false, ctrlKey: false, metaKey: false, altKey: false };
+      it.onDown({ ...base, ...mods, buttons: 1 });
+      it.onUp({ ...base, ...mods, buttons: 0 });
+    };
+    const r = {};
+    // If a click lands on nothing, every check below fails for one boring
+    // reason; say so plainly rather than leaving eight red lines to puzzle over.
+    const { pick } = await import('./js/core/hit.js');
+    r.shapesExist = ['msA','msB','msC'].every((id) => !!a.store.get(id));
+    r.clickLandsOnShape = pick(a.store, { x: 2030, y: 2020 })?.id === 'msA';
+    r.secondLands = pick(a.store, { x: 2230, y: 2020 })?.id === 'msB';
+
+    /*
+     * The same clicks with the PEN tool chosen and a stylus already seen,
+     * which is the path most people are actually on: the pen draws and the
+     * mouse points. It used to ignore Ctrl and behave like a plain click.
+     */
+    a.setTool('pen');
+    // mouseInks is a getter over this setting, so the setting is the way to
+    // put the mouse into pointer mode. Assigning to the getter does nothing at
+    // all, which is how an earlier version of this test ended up drawing ink
+    // over its own shapes and then failing to click them.
+    const inkWas = a.settings.inkWithMouse;
+    a.settings.inkWithMouse = 'no';
+    r.pointerModeOn = a.mouseInks === false;
+    a.setSelection([]);
+    click(2030, 2020);
+    const pointerFirst = sf.selection.size;
+    click(2230, 2020, { ctrlKey: true });
+    r.pointerCtrlAdds = sf.selection.size === pointerFirst + 1;
+    click(2430, 2020, { shiftKey: true });
+    r.pointerShiftAdds = sf.selection.size === pointerFirst + 2;
+    click(2230, 2020, { ctrlKey: true });
+    r.pointerCtrlRemoves = !sf.selection.has('msB');
+    /*
+     * And with the mouse set to DRAW, which is the other half of the trap:
+     * the press used to go straight off to start a stroke, so Ctrl-click left
+     * a dot instead of a selection.
+     */
+    a.settings.inkWithMouse = 'yes';
+    a.setSelection([]);
+    const inkBefore = a.store.objects.filter((o) => o.type === 'stroke').length;
+    click(2030, 2020, { ctrlKey: true });
+    click(2230, 2020, { ctrlKey: true });
+    r.inkingCtrlSelects = sf.selection.size === 2;
+    r.inkingCtrlDrewNothing =
+      a.store.objects.filter((o) => o.type === 'stroke').length === inkBefore;
+
+    // a stylus tap with Ctrl held picks up too, rather than leaving a dot
+    a.setSelection([]);
+    const penInk = a.store.objects.filter((o) => o.type === 'stroke').length;
+    const penClick = (x, y) => {
+      it.action = null; it.pointers.clear();
+      const p = at(x, y);
+      const base = { pointerId: 9, pointerType: 'pen', button: 0, pressure: 0.5,
+        clientX: p.x, clientY: p.y, shiftKey: false, ctrlKey: true, metaKey: false, altKey: false };
+      it.onDown({ ...base, buttons: 1 });
+      it.onUp({ ...base, buttons: 0 });
+    };
+    penClick(2030, 2020);
+    penClick(2430, 2020);
+    r.stylusCtrlSelects = sf.selection.size === 2;
+    r.stylusCtrlDrewNothing =
+      a.store.objects.filter((o) => o.type === 'stroke').length === penInk;
+
+    a.settings.inkWithMouse = inkWas;
+    a.setSelection([]);
+    // Anything the pen may have left behind goes now, so the clicks below land
+    // on the test shapes rather than on a stray dot lying over one of them.
+    const strays = a.store.objects.filter((o) => !had.has(o.id) && !/^ms[ABC]$/.test(o.id)).map((o) => o.id);
+    if (strays.length) a.store.remove(strays);
+
+    a.setTool('select');
+
+    click(2030, 2020);
+    r.sizeAfterPlain = sf.selection.size;
+    r.plainClick = sf.selection.size === 1;
+    click(2230, 2020, { ctrlKey: true });
+    r.sizeAfterCtrl = sf.selection.size;
+    r.ctrlAdds = sf.selection.size === 2;
+    click(2430, 2020, { shiftKey: true });
+    r.sizeAfterShift = sf.selection.size;
+    r.shiftAddsToo = sf.selection.size === 3;
+    click(2230, 2020, { ctrlKey: true });
+    r.ctrlRemoves = sf.selection.size === 2 && !sf.selection.has('msB');
+    r.removalArmsNoDrag = it.action === null;
+
+    // Dragging a grouped object with the mouse acting as a pointer - the pen
+    // drawing, the Wacom connected - has to bring the whole group. This path
+    // gathers its own objects and used to know only about attachment.
+    a.setSelection(['msA', 'msB']);
+    a.groupSelection();
+    a.setSelection([]);
+    const wasInk2 = a.settings.inkWithMouse;
+    a.settings.inkWithMouse = 'no';
+    a.setTool('pen');
+    const bWas = a.store.get('msB').x;
+    it.action = null; it.pointers.clear();
+    const from = at(2030, 2020), to = at(2090, 2020);
+    const drag = (p, buttons) => ({ pointerId: 6, pointerType: 'mouse', button: 0, buttons,
+      clientX: p.x, clientY: p.y, shiftKey: false, ctrlKey: false, metaKey: false, altKey: false });
+    it.onDown(drag(from, 1));
+    it.onMove(drag(to, 1));
+    it.onUp(drag(to, 0));
+    r.pointerDragMovesGroup = a.store.get('msB').x !== bWas;
+    r.pointerDragMovedBoth = a.store.get('msA').x !== 2000 && a.store.get('msB').x !== bWas;
+    a.settings.inkWithMouse = wasInk2;
+    a.setTool('select');
+    a.setSelection(['msA']); a.ungroupSelection();
+    a.store.update('msA', { x: 2000 }); a.store.update('msB', { x: 2200 });
+    a.setSelection([]);
+
+    // a group goes in and comes back out as one piece
+    a.setSelection(['msA', 'msB']);
+    a.groupSelection();
+    a.setSelection([]);
+    click(2030, 2020);
+    r.groupClicksIn = sf.selection.size === 2;
+    click(2430, 2020, { ctrlKey: true });
+    r.thirdAdded = sf.selection.size === 3;
+    click(2030, 2020, { ctrlKey: true });
+    r.groupComesOut = sf.selection.size === 1 && sf.selection.has('msC');
+    a.setSelection(['msA']); a.ungroupSelection();
+
+    // and the touch mode adds without any key held
+    a.setSelection(['msA']);
+    a.setMultiSelect(true);
+    r.modeOn = a.multiSelect === true;
+    r.modeAdds = a.chooseObject('msB') === 'added' && sf.selection.size === 2;
+    r.modeRemoves = a.chooseObject('msB') === 'removed' && sf.selection.size === 1;
+    a.setSelection([]);
+    r.modeDiesWithSelection = a.multiSelect === false;
+
+    a.setSelection([]); a.multiSelect = false;
+    const mine = a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id);
+    if (mine.length) a.store.remove(mine);
+    sf.cam.x = camWas.x; sf.cam.y = camWas.y; sf.cam.z = camWas.z;
+    it.action = null; it.pointers.clear();
+    return r;
+  `);
+  check('the test shapes exist where the test clicks',
+    multi.shapesExist && multi.clickLandsOnShape && multi.secondLands,
+    `exist ${multi.shapesExist}, first ${multi.clickLandsOnShape}, second ${multi.secondLands}`);
+  check('the mouse can be put into pointer mode for this test', multi.pointerModeOn);
+  check('Ctrl-click gathers objects up even while the pen tool is chosen',
+    multi.pointerCtrlAdds && multi.pointerShiftAdds);
+  check('and Ctrl-clicking one of them there takes it back out', multi.pointerCtrlRemoves);
+  check('Ctrl-click selects even when the mouse is set to draw, and leaves no ink',
+    multi.inkingCtrlSelects && multi.inkingCtrlDrewNothing,
+    `selected ${multi.inkingCtrlSelects}, clean ${multi.inkingCtrlDrewNothing}`);
+  check('a stylus with Ctrl held picks things up rather than dotting them',
+    multi.stylusCtrlSelects && multi.stylusCtrlDrewNothing,
+    `selected ${multi.stylusCtrlSelects}, clean ${multi.stylusCtrlDrewNothing}`);
+  check('a plain click selects just the one thing', multi.plainClick,
+    `selection was ${multi.sizeAfterPlain}`);
+  check('Ctrl-click adds another, and Shift-click does the same',
+    multi.ctrlAdds && multi.shiftAddsToo,
+    `after Ctrl ${multi.sizeAfterCtrl}, after Shift ${multi.sizeAfterShift}`);
+  check('Ctrl-clicking a selected object takes it back out', multi.ctrlRemoves);
+  check('and taking one out does not arm a drag of the rest', multi.removalArmsNoDrag);
+  check('dragging a grouped object with the pointer brings the whole group',
+    multi.pointerDragMovesGroup && multi.pointerDragMovedBoth);
+  check('a group joins the selection whole', multi.groupClicksIn && multi.thirdAdded);
+  check('and leaves it whole, rather than being re-added a moment later',
+    multi.groupComesOut);
+  check('on a touchscreen the add-to-selection mode adds and removes',
+    multi.modeOn && multi.modeAdds && multi.modeRemoves);
+  check('and the mode switches itself off when nothing is selected',
+    multi.modeDiesWithSelection);
+
+  /* ---- emoji ---------------------------------------------------------- *
+   * Stamping one, the search that finds it, swapping the character on a
+   * selection, and the tap that only shuts the picker.
+   */
+  const emo = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface;
+    const had = new Set(a.store.objects.map((o) => o.id));
+    const camWas = { x: sf.cam.x, y: sf.cam.y, z: sf.cam.z };
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.hideMenus(); a.setSelection([]);
+    it.action = null; it.actionId = null; it.pointers.clear();
+    const rect = sf.canvas.getBoundingClientRect();
+    const at = (x, y) => { const p = sf.cam.toScreen(x, y);
+      return { x: rect.left + p.x, y: rect.top + p.y }; };
+    const mk = (p, buttons) => ({ pointerId: 77, pointerType: 'touch', button: 0, buttons,
+      clientX: p.x, clientY: p.y, shiftKey: false, altKey: false, pressure: 0.5 });
+    const count = () => a.store.objects.filter((o) => o.type === 'emoji').length;
+    const tap = (x, y) => { it.action = null; it.pointers.clear();
+      it.onDown(mk(at(x, y), 1)); it.onUp(mk(at(x, y), 0)); };
+
+    const { searchEmoji, EMOJI, EMOJI_GROUPS } = await import('./js/core/emoji.js');
+    const names = EMOJI.map((e) => e.name);
+    const r = {
+      catalogue: EMOJI.length,
+      everyGroupHasItems: EMOJI_GROUPS.every((g) => g.items.length > 0),
+      allGrouped: EMOJI_GROUPS.reduce((n, g) => n + g.items.length, 0) === EMOJI.length,
+      noDuplicates: new Set(EMOJI.map((e) => e.ch)).size === EMOJI.length,
+      everyOneSearchable: names.every((n) => searchEmoji(n, 80).some((e) => e.name === n)),
+      tickFindsTheCheck: searchEmoji('tick', 1)[0]?.name === 'check mark button',
+      starBeatsStarStruck: searchEmoji('star', 1)[0]?.name === 'star',
+      nonsenseFindsNothing: searchEmoji('qzqzqz').length === 0,
+      emptyFindsNothing: searchEmoji('').length === 0,
+      twoWordsNarrow: searchEmoji('up arrow').every((e) => /up/.test(e.name + e.keywords))
+    };
+
+    a.setTool('emoji');
+    a.settings.emojiChar = '\u2705';
+    const before = count();
+
+    // the tap that shuts the picker must not stamp anything
+    const { openPopover } = await import('./js/ui/popover.js');
+    openPopover(document.getElementById('toolbar'), document.createElement('div'), { key: 'tool:emoji' });
+    tap(12000, 9000);
+    r.afterDismiss = count() - before;
+    r.toolAfterDismiss = a.tool;
+
+    // now a real tap
+    const returnWas = a.settings.returnToSelect;
+    a.settings.returnToSelect = false;
+    tap(12000, 9000);
+    r.afterTap = count() - before;
+    const made = a.store.objects.filter((o) => o.type === 'emoji' && !had.has(o.id))[0];
+    const { emojiAspect } = await import('./js/core/render.js');
+    // Not square - shaped like the character, so nothing arrives squashed.
+    const want = emojiAspect(made?.ch || '');
+    r.naturalShape = !!made && made.w > 0 && made.h > 0
+      && Math.abs((made.w / made.h) - want) < 0.02;
+    r.sensibleSize = !!made && Math.max(made.w, made.h) > 10;
+    r.centred = !!made && Math.abs((made.x + made.w / 2) - 12000) < 0.01;
+    r.stamped = made?.ch;
+    r.selected = a.selected.length === 1 && a.selected[0].type === 'emoji';
+    r.toolStays = a.tool;
+
+    // the character can be swapped on an existing one
+    r.swapReported = a.applyToSelection({ ch: '\u274C' }, 'emoji');
+    r.swapped = a.store.get(made.id).ch;
+    r.swapMissesOtherTypes = a.applyToSelection({ ch: '\u2705' }, 'note') === false;
+
+    // Resizing is the ordinary box resize - no special case, no font to chase.
+    // The numbers are copied out first: the variable holds the stored object
+    // itself, so reading its width after the change compares it against itself.
+    const wasW = made.w, wasH = made.h;
+    a.store.update(made.id, { w: wasW * 2, h: wasH * 3 });
+    const grown = a.store.get(made.id);
+    r.resizes = grown.w === wasW * 2 && grown.h === wasH * 3;
+
+    // and it is picked by a click inside it, like any other boxy object
+    const { pick } = await import('./js/core/hit.js');
+    r.hittable = pick(a.store, { x: grown.x + grown.w / 2, y: grown.y + grown.h / 2 })?.id === made.id;
+
+    // A fresh stamp, so the undo under test is the stamp itself rather than
+    // the resize and the swap that happened to it above.
+    a.setSelection([]);
+    const wasThere = count();
+    tap(12600, 9000);
+    r.secondStamped = count() === wasThere + 1;
+    a.store.undo();
+    r.undone = count() === wasThere;
+
+    /*
+     * Stamping one sends the board back to Select, so the next press of the
+     * emoji button is its FIRST press again. Under the usual click-again rule
+     * that press only re-arms the tool and looks like nothing happened.
+     */
+    a.hideMenus();
+    a.setTool('select');
+    const emojiBtn = document.querySelector('#toolbar [data-tool="emoji"]');
+    r.buttonExists = !!emojiBtn;
+    emojiBtn?.click();
+    await new Promise((res) => setTimeout(res, 80));
+    r.oneClickOpensPicker = !!document.querySelector('.pop .emoji-search');
+    r.oneClickAlsoArmsTool = a.tool === 'emoji';
+    emojiBtn?.click();                       // and pressing it again puts it away
+    await new Promise((res) => setTimeout(res, 80));
+    r.secondClickCloses = !document.querySelector('.pop .emoji-search');
+
+    a.settings.returnToSelect = returnWas;
+    a.setTool('select'); a.setSelection([]); a.hideMenus();
+    const mine = a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id);
+    if (mine.length) a.store.remove(mine);
+    sf.cam.x = camWas.x; sf.cam.y = camWas.y; sf.cam.z = camWas.z;
+    it.action = null; it.pointers.clear();
+    return r;
+  `);
+  check('the emoji button opens the picker on the first press, not the second',
+    emo.buttonExists && emo.oneClickOpensPicker && emo.oneClickAlsoArmsTool);
+  check('and pressing it again puts the picker away', emo.secondClickCloses);
+  check('the emoji catalogue is a useful size and free of repeats',
+    emo.catalogue > 150 && emo.noDuplicates, `${emo.catalogue} entries`);
+  check('every emoji sits in exactly one group', emo.allGrouped && emo.everyGroupHasItems);
+  check('every emoji can be found by its own name', emo.everyOneSearchable);
+  check('searching "tick" offers the check mark, not the joystick', emo.tickFindsTheCheck);
+  check('searching "star" offers the star before anything starting', emo.starBeatsStarStruck);
+  check('a search that matches nothing says so rather than guessing',
+    emo.nonsenseFindsNothing && emo.emptyFindsNothing);
+  check('two words narrow the search instead of widening it', emo.twoWordsNarrow);
+  check('the tap that shuts the emoji picker stamps nothing',
+    emo.afterDismiss === 0 && emo.toolAfterDismiss === 'emoji');
+  check('a tap stamps one emoji, centred on the tap', emo.afterTap === 1 && emo.centred);
+  check('it arrives shaped like the character, not squashed into a square',
+    emo.naturalShape && emo.sensibleSize);
+  check('and arrives selected, ready for the handles', emo.selected);
+  check('the stamped character is the chosen one', emo.stamped === '\u2705', emo.stamped);
+  check('choosing another swaps the selected one instead of stamping',
+    emo.swapReported === true && emo.swapped === '\u274C', emo.swapped);
+  check('a swap aimed at another kind of object changes nothing', emo.swapMissesOtherTypes);
+  check('it resizes like any other box, in both directions', emo.resizes);
+  check('and a click inside it picks it up', emo.hittable);
+  check('a second stamp lands without a trip to the picker', emo.secondStamped);
+  check('one undo removes a stamped emoji', emo.undone);
+
+  /* ---- the bundled emoji font ----------------------------------------- *
+   * The reason it is bundled: the system emoji on Android are one small
+   * picture per character, so a big stamp is that picture stretched. Ours are
+   * outlines. All of which is worth nothing if the file never actually loads,
+   * which is the easy way for this to break silently - the board would simply
+   * go on drawing the system's emoji and look fine on a Windows desktop.
+   */
+  const font = await js(`
+    const r = {};
+    const { EMOJI } = await import('./js/core/emoji.js');
+    // Ask for every character, not just one: a font that loaded but is missing
+    // half the catalogue would pass a single-character check.
+    const chars = EMOJI.map((e) => e.ch).join('');
+    await document.fonts.load('100px "GazBoard Emoji"', chars);
+    await document.fonts.ready;
+    const faces = [...document.fonts].filter((f) => f.family === 'GazBoard Emoji');
+    r.faces = faces.length;
+    r.loaded = faces.filter((f) => f.status === 'loaded').length;
+    r.checkSaysYes = document.fonts.check('100px "GazBoard Emoji"');
+
+    // Drawing proof rather than bookkeeping: the same character measured
+    // through our font and through a family that does not exist. Different
+    // numbers mean the glyph really came from the file we shipped.
+    const g = document.createElement('canvas').getContext('2d');
+    const widthIn = (family, ch) => { g.font = '100px ' + family; return g.measureText(ch).width; };
+    const sample = ['\u2705', '\u{1F680}', '\u{1F4A1}'];
+    r.differs = sample.map((ch) => ({
+      ch, ours: Math.round(widthIn('"GazBoard Emoji"', ch) * 100) / 100,
+      system: Math.round(widthIn('NoSuchFamilyXYZ', ch) * 100) / 100
+    }));
+
+    /*
+     * Every character in the picker, drawn twice: once through our font and
+     * once through a family that does not exist, which forces the machine's
+     * own emoji. Ink alone proves nothing - a character missing from our file
+     * falls back and still draws. Two IDENTICAL pictures are the giveaway.
+     */
+    const probe = document.createElement('canvas');
+    probe.width = probe.height = 48;
+    const x = probe.getContext('2d', { willReadFrequently: true });
+    const signature = (ch, family) => {
+      x.clearRect(0, 0, 48, 48);
+      x.font = '38px ' + family;
+      x.textAlign = 'center'; x.textBaseline = 'middle';
+      x.fillText(ch, 24, 24);
+      const d = x.getImageData(0, 0, 48, 48).data;
+      let ink = 0, hash = 2166136261;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i + 3] > 8) ink++;
+        hash = Math.imul(hash ^ d[i] ^ d[i + 1] ^ d[i + 2] ^ d[i + 3], 16777619) >>> 0;
+      }
+      return { ink, hash };
+    };
+    r.blank = [];
+    r.fellBack = [];
+    for (const e of EMOJI) {
+      const ours = signature(e.ch, '"GazBoard Emoji"');
+      const system = signature(e.ch, 'NoSuchFamilyXYZ');
+      if (ours.ink === 0) r.blank.push(e.ch);
+      else if (ours.hash === system.hash) r.fellBack.push(e.ch);
+    }
+    r.total = EMOJI.length;
+    return r;
+  `);
+  check('the bundled emoji font loads in the running app',
+    font.faces > 0 && font.loaded === font.faces && font.checkSaysYes,
+    `${font.loaded} of ${font.faces} faces loaded, document.fonts.check=${font.checkSaysYes}`);
+  check('emoji are measured through the bundled font, not the machine\'s own',
+    font.differs.every((d) => d.ours !== d.system),
+    font.differs.map((d) => `${d.ch} ours ${d.ours} vs system ${d.system}`).join(' | '));
+  check('every emoji in the picker draws something', font.blank.length === 0,
+    `${font.total - font.blank.length} of ${font.total} drew ink; blank: ${font.blank.length ? font.blank.join(' ') : 'none'}`);
+  check('and every one of them comes from the bundled font, not a fallback',
+    font.fellBack.length === 0,
+    `${font.total - font.fellBack.length} of ${font.total} differ from the system rendering; ` +
+    `identical to the system (so missing from our file): ${font.fellBack.length ? font.fellBack.join(' ') : 'none'}`);
 
   await js(`window.app.setSelection([window.app.store.doc.order[0]]);`);
   await sleep(250);
@@ -2761,6 +5397,440 @@ async function run(win, app) {
     pageTpl.page && pageTpl.page.h > pageTpl.page.w && pageTpl.objectsAdded === 0,
     JSON.stringify(pageTpl));
 
+  /* ---- changing the canvas size says so, on the panel and on the board ---- */
+  /*
+   * An infinite canvas has no outside, so nothing on it is ever "off the page".
+   * Turn it into a pad and work that was spread comfortably across the desk can
+   * be sitting beyond the sheet - still there, still safe, but not on the paper
+   * and not in the export. Worth saying at the moment it happens, rather than
+   * leaving it to be discovered at print time.
+   */
+  const sizeMenu = await js(`
+    const a = window.app;
+    const r = {};
+    a.newBoard(true); a.store.clear();
+    await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+
+    // three things well spread out, the shape of a lesson drawn on open canvas
+    for (const [id, x, y] of [['near', 0, 0], ['far', 2600, 40], ['lower', 120, 2400]]) {
+      a.store.add({ id, type: 'shape', kind: 'rect', x, y, w: 160, h: 120, rotation: 0,
+                    stroke: '#201f1e', fill: 'none', lineWidth: 3 }, 'x');
+    }
+
+    // Canvas size lives in "Format background", not Templates - Templates has a
+    // group of the same name that drops a sized page on the board instead.
+    a.panels.background();
+    await new Promise((res) => setTimeout(res, 120));
+    r.panelOpened = document.getElementById('panel').classList.contains('open');
+    const sizeButtons = () => Array.from(document.getElementById('panelBody').querySelectorAll('.bg-sizes .btn'));
+    // The size row, the orientation row and the fit offer all share the class,
+    // so "which size is lit" has to look at the first row only or Portrait
+    // joins the answer.
+    const sizeRowButtons = () => {
+      const row = document.getElementById('panelBody').querySelector('.bg-sizes');
+      return row ? Array.from(row.querySelectorAll('.btn')) : [];
+    };
+    const litLabels = () => sizeRowButtons().filter((b) => b.classList.contains('primary')).map((b) => b.textContent.trim());
+    const fitButton = () => sizeButtons().find((b) => /Fit .* onto the page/.test(b.textContent));
+
+    r.litWhileInfinite = litLabels().join(',');
+    r.noFitOfferWhileInfinite = !fitButton();
+
+    // switch to A4 by pressing the panel's own button, the way a person does
+    const a4 = sizeButtons().find((b) => b.textContent.trim() === 'A4');
+    r.foundA4Button = !!a4;
+    if (a4) a4.click();
+    /*
+     * Read the row BEFORE awaiting anything. setPageSize() is async, so this is
+     * the moment a phone spends staring at a tap that looks ignored - the page
+     * is changing but nothing on screen says so. The row has to answer here,
+     * not after the work finishes.
+     */
+    r.litTheInstantItWasPressed = litLabels().join(',');
+    await new Promise((res) => setTimeout(res, 200));
+
+    r.litAfterChoosingA4 = litLabels().join(',');
+    r.pageIsNowA4 = !!a.store.page;
+    r.strayCount = a.offPageObjects().length;
+    r.fitOfferAppeared = !!fitButton();
+    r.fitOfferSays = fitButton() ? fitButton().textContent.trim() : '(no offer)';
+
+    // the board itself says so too, with the fix on the note
+    const toasts = Array.from(document.querySelectorAll('#toasts .toast'));
+    const last = toasts[toasts.length - 1];
+    // read the message span itself, not the whole toast - the icon and the
+    // action button are in there too and make a mess of textContent
+    const msgSpan = last ? last.querySelectorAll('span')[1] : null;
+    r.toastSaid = msgSpan ? msgSpan.textContent.trim() : '(no toast)';
+    const act = last ? last.querySelector('.toast-action') : null;
+    r.toastOffersTheFix = !!act;
+
+    /*
+     * elementFromPoint, not .click().
+     *
+     * A synthetic .click() ignores pointer-events entirely, so it presses a
+     * button a real finger cannot reach. The toast layer is click-through by
+     * design - passing notes must not block the board - and this button was
+     * inside it, visible and styled and completely dead, while the test that
+     * was supposed to cover it sailed through. Asking what is actually at the
+     * button's centre is the question a finger asks.
+     */
+    const hit = act ? (() => {
+      const b = act.getBoundingClientRect();
+      const el = document.elementFromPoint(Math.round(b.left + b.width / 2), Math.round(b.top + b.height / 2));
+      return el && (el === act || act.contains(el)) ? act : el;
+    })() : null;
+    r.buttonIsReachable = hit === act;
+    r.whatIsAtTheButton = hit ? (hit === act ? 'the button' : (hit.className || hit.tagName)) : '(nothing)';
+
+    // and pressing it actually brings the work onto the paper
+    if (act) act.click();
+    await new Promise((res) => setTimeout(res, 200));
+    r.strayAfterPressing = a.offPageObjects().length;
+    r.everythingKept = a.store.objects.length;
+
+    // the offer stands down once there is nothing left off the paper
+    a.panels.background(); a.panels.background();   // close, then open fresh
+    await new Promise((res) => setTimeout(res, 160));
+    r.offerGoneWhenNothingStray = !fitButton();
+
+    // back to infinite, and the panel says infinite
+    const inf = sizeButtons().find((b) => b.textContent.trim() === 'Infinite');
+    if (inf) inf.click();
+    await new Promise((res) => setTimeout(res, 200));
+    r.litAfterBackToInfinite = litLabels().join(',');
+
+    a.panels.close?.();
+    a.newBoard(true); a.store.clear();
+    return r;
+  `);
+  check('the canvas-size panel lights the size the board is actually on',
+    sizeMenu.panelOpened === true && sizeMenu.foundA4Button === true && sizeMenu.litWhileInfinite === 'Infinite' &&
+    sizeMenu.litAfterChoosingA4 === 'A4' && sizeMenu.pageIsNowA4 === true,
+    `panel open: ${sizeMenu.panelOpened}, found the A4 button: ${sizeMenu.foundA4Button}; ` +
+    `lit while infinite: "${sizeMenu.litWhileInfinite}", after choosing A4: "${sizeMenu.litAfterChoosingA4}" ` +
+    `(wanted "A4" — "Infinite" here means the page changed but the panel never redrew), board is a pad: ${sizeMenu.pageIsNowA4}`);
+  check('the press shows at once, without waiting for the page to be rebuilt',
+    sizeMenu.litTheInstantItWasPressed === 'A4',
+    `the instant A4 was pressed the row showed "${sizeMenu.litTheInstantItWasPressed}" (wanted "A4") — ` +
+    `"Infinite" here is the beat a phone spends looking like it ignored the tap`);
+  check('and it lights Infinite again when the board goes back to no edges',
+    sizeMenu.litAfterBackToInfinite === 'Infinite',
+    `lit after going back: "${sizeMenu.litAfterBackToInfinite}", wanted "Infinite"`);
+  check('work left off the paper is offered a one-press fix, right when it happens',
+    sizeMenu.noFitOfferWhileInfinite === true && sizeMenu.strayCount > 0 && sizeMenu.fitOfferAppeared === true,
+    `${sizeMenu.strayCount} item(s) off the paper; the panel offered "${sizeMenu.fitOfferSays}" ` +
+    `(no offer while the canvas was infinite: ${sizeMenu.noFitOfferWhileInfinite})`);
+  check('the board says so too, so you need not have the panel open to find out',
+    /off the paper/.test(sizeMenu.toastSaid) && sizeMenu.toastOffersTheFix === true,
+    `the note said "${sizeMenu.toastSaid}" and carried a button: ${sizeMenu.toastOffersTheFix}`);
+  check('and that button can actually be pressed, not just drawn',
+    sizeMenu.buttonIsReachable === true,
+    `what sits at the middle of the button: ${sizeMenu.whatIsAtTheButton} — anything but "the button" means ` +
+    `the click passes straight through it, which is what the toast layer does by default`);
+  /* ---- the canvas you set up can be the one every new board starts on ---- */
+  const canvasMemory = await js(`
+    const a = window.app;
+    const r = {};
+    const s = a.settings;
+    delete s.canvasDefaults; s.rememberCanvas = false; a.saveSettings();
+
+    a.newBoard(true);
+    await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+
+    // --- off by default: setting up a canvas changes THIS board only --------
+    r.offByDefault = s.rememberCanvas === false;
+    await a.setPageSize('a4', 'portrait');
+    a.store.setBackground({ color: '#2b2b2b', pattern: 'grid' });
+    r.thisBoardTookIt = !!a.store.page && a.store.doc.background.color === '#2b2b2b';
+    a.newBoard(true);
+    await new Promise((res) => setTimeout(res, 200));
+    r.nextBoardStayedPlain = !a.store.page && a.store.doc.background.color !== '#2b2b2b';
+
+    // --- turning it on adopts what is on screen, there and then -------------
+    await a.setPageSize('a5', 'landscape');
+    a.store.setBackground({ color: '#2b2b2b', pattern: 'dots' });
+    a.panels.background();
+    await new Promise((res) => setTimeout(res, 140));
+    const words = [...document.querySelectorAll('#panelBody span')]
+      .find((n) => /Use this canvas for new boards/.test(n.textContent || ''));
+    r.foundTheSwitch = !!words;
+    if (words) words.click();
+    await new Promise((res) => setTimeout(res, 160));
+    r.switchedOn = s.rememberCanvas === true;
+    r.adoptedOnTheSpot = !!s.canvasDefaults && s.canvasDefaults.paper === 'a5'
+      && s.canvasDefaults.color === '#2b2b2b' && s.canvasDefaults.pattern === 'dots';
+    r.adopted = JSON.stringify(s.canvasDefaults || null);
+
+    // --- so the next new board opens on it ---------------------------------
+    a.newBoard(true);
+    await new Promise((res) => setTimeout(res, 300));
+    const { paperForPage } = await import('app://board/js/ui/pdfdialog.js');
+    const got = a.store.page ? paperForPage(a.store.page) : null;
+    r.newBoardPaper = got ? got.paper + ' ' + got.orientation : '(infinite)';
+    r.newBoardColour = a.store.doc.background.color;
+    r.newBoardPattern = a.store.doc.background.pattern;
+    r.newBoardInherited = !!got && got.paper === 'a5' && got.orientation === 'landscape'
+      && a.store.doc.background.color === '#2b2b2b' && a.store.doc.background.pattern === 'dots';
+
+    // --- and a board made BEFORE any of this is left exactly as it was ------
+    // saved while the setting was off, on the plain canvas: opening it must not
+    // repaint somebody's old work in this week's colours
+    const oldBoard = { id: 'older-board', name: 'Made last week', schema: 2,
+      background: { color: '#ffffff', pattern: 'none' }, pages: [], objects: [], order: [] };
+    a.store.load(oldBoard);
+    await new Promise((res) => setTimeout(res, 150));
+    r.oldBoardColour = a.store.doc.background.color;
+    r.oldBoardPaper = a.store.page ? 'has a sheet' : 'still infinite';
+    r.oldBoardUntouched = a.store.doc.background.color === '#ffffff' && !a.store.page;
+
+    // --- the look does not arrive as something to undo ----------------------
+    a.newBoard(true);
+    await new Promise((res) => setTimeout(res, 300));
+    r.undoDepth = a.store.undoStack.length;
+    r.colourIsNotAnUndo = a.store.doc.background.color === '#2b2b2b' && a.store.undoStack.length <= 1;
+
+    // --- switching it back off leaves new boards plain again ---------------
+    s.rememberCanvas = false; a.saveSettings();
+    a.newBoard(true);
+    await new Promise((res) => setTimeout(res, 250));
+    r.plainAgain = !a.store.page && a.store.doc.background.color !== '#2b2b2b';
+
+    delete s.canvasDefaults; s.rememberCanvas = false; a.saveSettings();
+    a.panels.close?.();
+    a.newBoard(true); a.store.clear();
+    return r;
+  `);
+  /* ---- dark mode: on screen only, never in what leaves the app ---- */
+  /*
+   * The trap here is worth naming. The obvious way to do a dark board - have
+   * the black pen write white - produces white ink on the white paper of an
+   * export: a page that looks blank. It also does nothing for the boards
+   * already written, which stay invisible on the dark canvas. So the file never
+   * changes; only the painting of it does.
+   */
+  const dark = await js(`
+    const a = window.app;
+    const r = {};
+    const { inkPaint, boardPaint, isDarkBoard } = await import('app://board/js/core/render.js');
+    const was = a.settings.theme;
+
+    a.newBoard(true); a.store.clear();
+    await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+
+    const px = (x, y) => {
+      const d = a.surface.ctx.getImageData(Math.round(x * a.surface.dpr), Math.round(y * a.surface.dpr), 1, 1).data;
+      return '#' + [d[0], d[1], d[2]].map((n) => n.toString(16).padStart(2, '0')).join('');
+    };
+    // A spot of bare board. Not the centre: an empty board says Happy Inking
+    // there now, and this is asking what colour the board is, not the words.
+    const bare = () => px(a.surface.width / 2, a.surface.height / 4);
+
+    // --- light ------------------------------------------------------------
+    a.settings.theme = 'light'; a.saveSettings();
+    a.surface.repaintAll(); a.surface.draw();
+    r.lightRoot = document.documentElement.dataset.theme || '(none)';
+    r.lightBoardPixel = bare();
+    r.lightInk = inkPaint('#201f1e');
+
+    // --- dark -------------------------------------------------------------
+    a.settings.theme = 'dark'; a.saveSettings();
+    a.surface.repaintAll(); a.surface.draw();
+    r.darkRoot = document.documentElement.dataset.theme || '(none)';
+    r.darkBoardPixel = bare();
+    r.darkFlagSet = isDarkBoard();
+    r.chromeWentDark = getComputedStyle(document.body).getPropertyValue('--bg').trim();
+
+    // default ink flips, a chosen colour does not
+    r.defaultInkInDark = inkPaint('#201f1e');
+    r.redStaysRed = inkPaint('#e81123');
+    r.chosenBoardKept = boardPaint('#ffd94a');
+    r.whiteBoardWentDark = boardPaint('#ffffff');
+
+    // --- what is stored is untouched ---------------------------------------
+    a.store.add({ id: 'darkink', type: 'stroke', tool: 'pen', color: '#201f1e', width: 6,
+      effect: 'none', opacity: 1, rotation: 0,
+      points: [{ x: 40, y: 40, p: .6 }, { x: 300, y: 120, p: .6 }],
+      bbox: { x: 40, y: 40, w: 260, h: 80 } }, 'x');
+    r.storedColour = a.store.get('darkink').color;
+
+    // --- and neither is an export -------------------------------------------
+    // rendered while the screen is dark, which is the whole point
+    const shot = a.surface.renderTo({ x: 0, y: 0, w: 200, h: 200 }, 1, true);
+    const sd = shot.getContext('2d').getImageData(190, 190, 1, 1).data;
+    r.exportCorner = '#' + [sd[0], sd[1], sd[2]].map((n) => n.toString(16).padStart(2, '0')).join('');
+    r.darkRestoredAfterExport = isDarkBoard();
+
+    // --- the words, which is what somebody actually reads ------------------
+    // Each of these is a different path to text on the board, and each one got
+    // its colour from somewhere different before the theme existed.
+    const { inkPaint: ip } = await import('app://board/js/core/render.js');
+    r.textObjectInk = ip('#201f1e');              // a text box
+    r.shapeLabelInk = ip(undefined);              // words inside a shape
+    r.chosenTextKept = ip('#e81123');             // text somebody made red
+
+    // A sticky note reads its text colour off its OWN colour, not the theme -
+    // a yellow note wants black words in both themes.
+    const { readableText } = await import('app://board/js/core/util.js');
+    r.noteTextOnYellow = readableText('#ffd94a');
+
+    // and the live editor, where you watch the letters appear as you type
+    a.store.add({ id: 'darktext', type: 'text', x: 60, y: 300, w: 300, h: 60, rotation: 0,
+      text: 'typing on a dark board', color: '#201f1e', fontSize: 28, font: 'hand' }, 'x');
+    a.textEditor.begin(a.store.get('darktext'));
+    await new Promise((res) => setTimeout(res, 120));
+    r.editorInk = a.textEditor.el ? getComputedStyle(a.textEditor.el).color : '(no editor)';
+    a.textEditor.cancel();
+    await new Promise((res) => setTimeout(res, 80));
+
+    // --- the toolbar must not promise a colour the pen will not keep --------
+    a.setTool('pen');
+    a.syncUI();
+    const penBtn = document.querySelector('#toolbar .pen[data-pen="black"]');
+    const tb = await import('app://board/js/ui/toolbar.js');
+    tb.openToolPopover(a, penBtn, 'pen');
+    await new Promise((res) => setTimeout(res, 160));
+    r.popoverOpened = !!document.querySelector('.pop .sw');
+    const sws = [...document.querySelectorAll('.pop .sw')];
+    const swBg = (el) => getComputedStyle(el).backgroundColor;
+    const first = sws[0] || null;
+    r.swatchCount = sws.length;
+    r.defaultSwatchPaint = first ? swBg(first) : '(none)';
+    r.defaultSwatchMarked = !!first && first.classList.contains('sw-adaptive');
+    // the fixed white swatch must NOT be marked - that is the whole point of the ring
+    const whiteSw = sws.find((el) => (el.getAttribute('title') || '').startsWith('#ffffff'));
+    r.whiteSwatchMarked = !!whiteSw && whiteSw.classList.contains('sw-adaptive');
+    const dots = [...document.querySelectorAll('.pop .sizes i')];
+    r.thicknessDotPaint = dots.length ? getComputedStyle(dots[0]).backgroundColor : '(none)';
+    // and there is a way to ask for a colour the theme will never touch
+    const custom = document.querySelector('.pop .sw-custom input[type="color"]');
+    r.hasCustomInk = !!custom;
+    r.customBlackStaysBlack = ip('#000000');
+    a.hideMenus();
+
+    // --- the pen in the tray, and the nib under the pointer -----------------
+    // Both are pictures of the ink. A black barrel and a black nib on a dark
+    // board say "this writes black" while the pen writes light.
+    const trayBtn = document.querySelector('#toolbar .pen[data-pen="black"]');
+    r.trayBarrelPaint = trayBtn ? (trayBtn.dataset.paint || '(unpainted)') : '(no button)';
+    a.setTool('pen');
+    a.interaction.setCursor(a.interaction.inkCursor('pen'));
+    const cur = String(a.surface.canvas.style.cursor || '');
+    // the colour is inside the cursor's inline SVG
+    r.nibCarriesLightInk = /f3f2f1/i.test(decodeURIComponent(cur));
+    r.nibCarriesBlackInk = /201f1e/i.test(decodeURIComponent(cur));
+
+    // menus and panels take their colour from the stylesheet, so one sample
+    // stands for all of them
+    const probe = document.createElement('div');
+    probe.className = 'menu-item';
+    document.body.appendChild(probe);
+    r.menuTextColour = getComputedStyle(document.body).getPropertyValue('--text').trim();
+    probe.remove();
+
+    // --- system follows the machine ----------------------------------------
+    a.settings.theme = 'system'; a.saveSettings();
+    r.systemRoot = document.documentElement.dataset.theme || '(none)';
+    r.systemMatchesMachine = a.darkMode === matchMedia('(prefers-color-scheme: dark)').matches;
+
+    a.settings.theme = was === undefined ? 'system' : was; a.saveSettings();
+    a.store.clear(); a.newBoard(true);
+    return r;
+  `);
+  check('choosing a theme sets it on the page, and System leaves it to the machine',
+    dark.lightRoot === 'light' && dark.darkRoot === 'dark' && dark.systemRoot === '(none)'
+    && dark.systemMatchesMachine === true,
+    `light -> "${dark.lightRoot}", dark -> "${dark.darkRoot}", system -> "${dark.systemRoot}" ` +
+    `(System must set nothing, so the CSS media query answers); System agrees with the machine: ${dark.systemMatchesMachine}`);
+  check('the chrome and the board both actually go dark',
+    dark.lightBoardPixel === '#ffffff' && dark.darkBoardPixel !== '#ffffff'
+    && dark.darkFlagSet === true && dark.chromeWentDark !== '',
+    `board pixel light "${dark.lightBoardPixel}" -> dark "${dark.darkBoardPixel}", ` +
+    `chrome --bg is "${dark.chromeWentDark}"`);
+  check('default ink turns light on a dark board, and a colour you chose is left alone',
+    dark.lightInk === '#201f1e' && dark.defaultInkInDark !== '#201f1e' &&
+    dark.redStaysRed === '#e81123',
+    `default ink paints "${dark.lightInk}" in light and "${dark.defaultInkInDark}" in dark; ` +
+    `red paints "${dark.redStaysRed}" (wanted #e81123 — a chosen colour is the user's, not the theme's)`);
+  check('a board given its own colour keeps it, only the plain white sheet goes dark',
+    dark.chosenBoardKept === '#ffd94a' && dark.whiteBoardWentDark !== '#ffffff',
+    `a yellow board paints "${dark.chosenBoardKept}", a white one paints "${dark.whiteBoardWentDark}"`);
+  check('nothing about the file changes — the stroke is still black on disk',
+    dark.storedColour === '#201f1e',
+    `stored colour is "${dark.storedColour}", wanted #201f1e — anything else means dark mode ` +
+    `rewrote somebody's document`);
+  check('every kind of writing on a dark board is light, except where it should not be',
+    dark.textObjectInk === '#f3f2f1' && dark.shapeLabelInk === '#f3f2f1' &&
+    dark.chosenTextKept === '#e81123' && dark.noteTextOnYellow.toLowerCase() !== '#f3f2f1',
+    `a text box paints ${dark.textObjectInk}, words in a shape ${dark.shapeLabelInk}, ` +
+    `text you made red stays ${dark.chosenTextKept}, and a yellow sticky note's words stay ` +
+    `${dark.noteTextOnYellow} — a note carries its own colour, so its text follows the note, not the theme`);
+  check('and the words are visible while you are still typing them',
+    /248|243|f3f2f1/i.test(dark.editorInk),
+    `the editor is writing in ${dark.editorInk} on a dark board — black here means you type ` +
+    `into blackness and only see the words after clicking away`);
+  check('the ink swatch shows the colour the pen will really use',
+    /243|248|f3f2f1/i.test(dark.defaultSwatchPaint) && dark.defaultSwatchMarked === true &&
+    dark.whiteSwatchMarked === false,
+    `the default swatch is painted ${dark.defaultSwatchPaint} and marked as theme-following: ` +
+    `${dark.defaultSwatchMarked} (popover opened: ${dark.popoverOpened}, ${dark.swatchCount} swatches); ` +
+    `the fixed white swatch marked: ${dark.whiteSwatchMarked} ` +
+    `(must be false — the ring is what tells the two apart once both look light)`);
+  check('and so do the thickness dots',
+    /243|248|f3f2f1/i.test(dark.thicknessDotPaint),
+    `the thickness dots are painted ${dark.thicknessDotPaint} — black here is a row of ` +
+    `invisible dots on a dark panel`);
+  check('a colour you pick yourself is yours, even black on a dark board',
+    dark.hasCustomInk === true && dark.customBlackStaysBlack === '#000000',
+    `custom colour picker present: ${dark.hasCustomInk}; a deliberately chosen black paints ` +
+    `"${dark.customBlackStaysBlack}" (wanted #000000 — only the DEFAULT ink follows the theme)`);
+  check('the pen in the tray and the nib on the pointer show the ink too',
+    /f3f2f1/i.test(dark.trayBarrelPaint) && dark.nibCarriesLightInk === true &&
+    dark.nibCarriesBlackInk === false,
+    `the black pen's barrel is painted "${dark.trayBarrelPaint}" and the nib carries ` +
+    `${dark.nibCarriesLightInk ? 'light' : 'BLACK'} ink — a black barrel and a black nib on a ` +
+    `dark board promise black and deliver light`);
+  check('menus, panels and dialogs take the theme from the stylesheet',
+    dark.menuTextColour !== '' && dark.menuTextColour.toLowerCase() !== '#201f1e',
+    `--text resolves to "${dark.menuTextColour}" in dark`);
+  check('and an export made while the screen is dark is still white paper',
+    dark.exportCorner === '#ffffff' && dark.darkRestoredAfterExport === true,
+    `the exported corner came out "${dark.exportCorner}" (wanted #ffffff — a dark export is a ` +
+    `page that prints black, and white ink on it is a page that looks blank); ` +
+    `dark put back afterwards: ${dark.darkRestoredAfterExport}`);
+
+  check('out of the box, setting up a canvas changes that board and nothing else',
+    canvasMemory.offByDefault === true && canvasMemory.thisBoardTookIt === true &&
+    canvasMemory.nextBoardStayedPlain === true,
+    `switch starts off: ${canvasMemory.offByDefault}; this board took the A4 and the dark colour: ` +
+    `${canvasMemory.thisBoardTookIt}; the next new board stayed plain: ${canvasMemory.nextBoardStayedPlain} ` +
+    `(false here means it was changed for everyone without being asked)`);
+  check('the Canvas panel offers to use this canvas for new boards',
+    canvasMemory.foundTheSwitch === true && canvasMemory.switchedOn === true &&
+    canvasMemory.adoptedOnTheSpot === true,
+    `found the switch: ${canvasMemory.foundTheSwitch}, it went on: ${canvasMemory.switchedOn}, ` +
+    `and it adopted what was on screen: ${canvasMemory.adopted}`);
+  check('and every new board then opens on that canvas',
+    canvasMemory.newBoardInherited === true,
+    `the new board came up ${canvasMemory.newBoardPaper}, ${canvasMemory.newBoardColour}, ` +
+    `pattern ${canvasMemory.newBoardPattern} — wanted a5 landscape, #2b2b2b, dots`);
+  check('while a board made before any of it is left exactly as it was',
+    canvasMemory.oldBoardUntouched === true,
+    `the older board opened ${canvasMemory.oldBoardColour} and ${canvasMemory.oldBoardPaper} — ` +
+    `wanted #ffffff and still infinite; anything else means old work is being repainted`);
+  check('the look arrives as how the board IS, not as something to undo',
+    canvasMemory.colourIsNotAnUndo === true,
+    `${canvasMemory.undoDepth} thing(s) on the undo stack of a board one second old (wanted at most 1, ` +
+    `for the sheet itself)`);
+  check('and turning it off gives plain new boards back',
+    canvasMemory.plainAgain === true, `next board was plain again: ${canvasMemory.plainAgain}`);
+
+  check('and pressing that button brings the work onto the page, losing none of it',
+    sizeMenu.strayAfterPressing === 0 && sizeMenu.everythingKept === 3 &&
+    sizeMenu.offerGoneWhenNothingStray === true,
+    `${sizeMenu.strayAfterPressing} left off the paper (wanted 0), ${sizeMenu.everythingKept} objects still on the board ` +
+    `(wanted 3 — fewer means it deleted something), offer stood down afterwards: ${sizeMenu.offerGoneWhenNothingStray}`);
+
   const pageExport = await js(`
     const a = window.app;
     a.newBoard(true);
@@ -3024,6 +6094,213 @@ async function run(win, app) {
     return r;
   `);
   check('you cannot pan away from the paper until it is off screen', padCam.paperStillOnScreen === true);
+
+  /* ---- a sheet of paper does not slide out of the window sideways ---- */
+  /*
+   * A pad has a fixed width and an unlimited height. Down is the direction it
+   * travels in; sideways reaches nothing but desk, and people kept shoving A4
+   * half out of the window by accident and having to drag it back.
+   */
+  const sideways = await js(`
+    const a = window.app, sf = a.surface;
+    const r = {};
+    a.newBoard(true); a.store.clear();
+    // newBoard queues a frame that opens the board and places the camera. Let
+    // it land before this test starts placing the camera itself, or the two
+    // take turns and whichever wins depends on how fast the machine is.
+    await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+    await a.setPageSize('a4', 'portrait');
+    await new Promise((res) => requestAnimationFrame(res));
+    const { stripBounds } = await import('app://board/js/core/pages.js');
+    const paper = () => {
+      const b = stripBounds(a.pages), c = sf.cam;
+      return { left: b.x * c.z + c.x, width: b.w * c.z, view: sf.width, z: c.z };
+    };
+
+    // --- zoomed out, the page fits: it is pinned in the middle ------------
+    sf.cam.z = 0.35; sf.clampCamera();
+    const fitted = paper();
+    r.fitsInWindow = fitted.width <= fitted.view;
+    r.centredGap = Math.round(fitted.left - (fitted.view - fitted.width) / 2);
+    const xBefore = sf.cam.x;
+    sf.cam.panBy(-900, 0); sf.clampCamera();
+    r.driftAfterHardShove = Math.round(sf.cam.x - xBefore);
+    const shoved = paper();
+    r.stillCentred = Math.abs(shoved.left - (shoved.view - shoved.width) / 2) < 0.5;
+
+    // --- and a gentle nudge is refused just the same ----------------------
+    sf.cam.panBy(-12, 0); sf.clampCamera();
+    r.driftAfterNudge = Math.round(sf.cam.x - xBefore);
+
+    // --- zoomed in past the window: it pans, but never shows desk ---------
+    sf.cam.z = 3; sf.clampCamera();
+    const big = paper();
+    r.widerThanWindow = big.width > big.view;
+    sf.cam.panBy(-4000, 0); sf.clampCamera();
+    const hardLeft = paper();
+    // the right-hand edge of the paper may not come inside the window
+    r.rightEdgeHeld = Math.round(hardLeft.left + hardLeft.width - hardLeft.view);
+    sf.cam.panBy(9000, 0); sf.clampCamera();
+    const hardRight = paper();
+    r.leftEdgeHeld = Math.round(hardRight.left);
+    // it really did move between those two ends, so this is a limit, not a pin
+    r.travelled = Math.round(Math.abs(hardRight.left - hardLeft.left)) > 100;
+
+    // --- up and down is untouched: that IS how you read a pad -------------
+    sf.cam.z = 1; sf.clampCamera();
+    a.addPage(); a.addPage();
+    const yBefore = sf.cam.y;
+    sf.cam.panBy(0, -600); sf.clampCamera();
+    r.scrolledDown = Math.round(Math.abs(sf.cam.y - yBefore)) > 100;
+
+    // --- a window that changes shape puts the page back in the middle -----
+    // Nothing else asks for this: without it a page centred a moment ago sits
+    // off to one side until the next pan, which is exactly how it looks when
+    // a side panel opens or a tablet keyboard appears.
+    // Setting cam.x directly is what a changed window LEAVES BEHIND: the camera
+    // still holds the offset that centred the page in the old shape, and it is
+    // wrong for the new one. resize() has to notice. Writing cam.x by hand and
+    // forcing a resize reproduces that without needing to drive a real window,
+    // and it is the only way the check can fail for the right reason - going
+    // through clampCamera() to set up would centre it and prove nothing.
+    sf.cam.z = 0.35; sf.clampCamera();
+    sf.cam.x -= 260;                                  // the stale offset
+    const before = paper();
+    r.offCentreBeforeResize = Math.round(before.left - (before.view - before.width) / 2);
+    sf.resize(true);
+    const after = paper();
+    r.offCentreAfterResize = Math.round(after.left - (after.view - after.width) / 2);
+
+    // --- an infinite canvas is still free in both directions -------------
+    await a.setPageSize('infinite');
+    const free = sf.cam.x;
+    sf.cam.panBy(-4000, 0); sf.clampCamera();
+    r.infiniteStillFree = Math.abs(sf.cam.x - (free - 4000)) < 0.01;
+
+    a.newBoard(true); a.store.clear();
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    return r;
+  `);
+  check('a page that fits the window sits in the middle of it',
+    sideways.fitsInWindow === true && sideways.centredGap === 0,
+    `paper is ${sideways.fitsInWindow ? 'narrower' : 'WIDER'} than the window, ` +
+    `and sits ${sideways.centredGap}px off centre (wanted 0)`);
+  check('and cannot be shoved sideways out of it, hard or gently',
+    sideways.driftAfterHardShove === 0 && sideways.driftAfterNudge === 0 && sideways.stillCentred === true,
+    `a 900px shove moved it ${sideways.driftAfterHardShove}px and a 12px nudge ${sideways.driftAfterNudge}px ` +
+    `(wanted 0 and 0); still centred afterwards: ${sideways.stillCentred}`);
+  check('zoomed in past the window it pans, but never shows desk beside the paper',
+    sideways.widerThanWindow === true && sideways.travelled === true &&
+    sideways.rightEdgeHeld === 0 && sideways.leftEdgeHeld === 0,
+    `wider than the window: ${sideways.widerThanWindow}, actually moved between the ends: ${sideways.travelled}; ` +
+    `at the far left the paper's right edge sat ${sideways.rightEdgeHeld}px inside the window and at the far right ` +
+    `its left edge sat ${sideways.leftEdgeHeld}px inside (both wanted 0 — a positive number is desk on show)`);
+  check('while up and down still scrolls the pad, which is what a pad is for',
+    sideways.scrolledDown === true, `vertical pan moved the view: ${sideways.scrolledDown}`);
+  check('a window that changes shape puts the page back in the middle of it',
+    sideways.offCentreBeforeResize === -260 && sideways.offCentreAfterResize === 0,
+    `the stale offset left the page ${sideways.offCentreBeforeResize}px off centre (wanted -260, ` +
+    `so the check is not passing for free) and the resize left it ${sideways.offCentreAfterResize}px off (wanted 0)`);
+  check('and an infinite canvas is free to roam in both directions',
+    sideways.infiniteStillFree === true, `infinite board panned freely: ${sideways.infiniteStillFree}`);
+
+  /* ---- a pen keeps the colour you gave it ---- */
+  /*
+   * PENS is how the tray SHIPS. Reading a pen's colour from it always gave the
+   * factory answer, so recolouring pen 1, picking up pen 2, and coming back to
+   * pen 1 handed you the original black again - the choice was never stored.
+   */
+  const penMemory = await js(`
+    const a = window.app;
+    const { PENS, penById, heldPenId } = await import('app://board/js/ui/palettes.js');
+    const { choosePen, pickPenInk } = await import('app://board/js/ui/toolbar.js');
+    const r = {};
+    const s = a.settings;
+    const shipped = { black: PENS[0].color, red: PENS[1].color };
+    r.shipped = shipped;
+
+    delete s.pens; s.activePen = 'black';
+    choosePen(a, 'black');
+    r.blackStartsShipped = s.penColor === shipped.black;
+
+    // recolour the black pen to orange through the pen popover's own function
+    const ORANGE = '#ff8c00';
+    pickPenInk(a, ORANGE);
+    r.heldAfterRecolour = heldPenId(s);
+    r.inHandIsOrange = s.penColor === ORANGE;
+
+    // go to the red pen, then come back
+    choosePen(a, 'red');
+    r.redIsShipped = s.penColor === shipped.red;
+    choosePen(a, 'black');
+    r.blackCameBackAs = s.penColor;
+    r.remembered = s.penColor === ORANGE;
+
+    // the tray must LOOK recoloured too, not just write in the new colour
+    a.syncUI();
+    const swatch = document.querySelector('#toolbar .pen[data-pen="black"]');
+    r.trayPaint = swatch ? swatch.dataset.paint : '(no button)';
+    r.trayShowsOrange = !!swatch && swatch.dataset.paint.startsWith(ORANGE);
+    r.trayLitTheRightPen = !!swatch && swatch.classList.contains('active');
+    const redBtn = document.querySelector('#toolbar .pen[data-pen="red"]');
+    r.onlyOneLit = !!redBtn && !redBtn.classList.contains('active');
+
+    // two pens set to the same colour must still be told apart
+    choosePen(a, 'red');
+    pickPenInk(a, ORANGE);
+    r.bothOrange = penById(s, 'black').color === ORANGE && penById(s, 'red').color === ORANGE;
+    r.heldIsRedNotBlack = heldPenId(s) === 'red';
+    const blackBtn = document.querySelector('#toolbar .pen[data-pen="black"]');
+    a.syncUI();
+    r.sameColourStillOneLit = !!blackBtn && !blackBtn.classList.contains('active')
+      && !!document.querySelector('#toolbar .pen[data-pen="red"]').classList.contains('active');
+
+    // it survives a reload of the settings file
+    const saved = JSON.parse(localStorage.getItem('gazboard.settings') || '{}');
+    r.savedToDisk = !!(saved.pens && saved.pens.black && saved.pens.black.color === ORANGE);
+    r.savedActivePen = saved.activePen || null;
+
+    // the number keys reach the recoloured pen, not the shipped one
+    choosePen(a, 'red');
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true }));
+    r.digitGave = s.penColor;
+    r.digitGaveTheRecoloured = s.penColor === ORANGE;
+
+    // putting a pen back to what it shipped as leaves nothing stored
+    choosePen(a, 'black');
+    pickPenInk(a, shipped.black);
+    r.forgottenWhenPutBack = !s.pens || !s.pens.black;
+
+    delete s.pens; s.activePen = 'black';
+    pickPenInk(a, shipped.black);
+    a.saveSettings(); a.syncUI();
+    return r;
+  `);
+  check('a pen recoloured while it is in your hand remembers that colour',
+    penMemory.inHandIsOrange === true && penMemory.heldAfterRecolour === 'black',
+    `after recolouring, the hand held ${penMemory.heldAfterRecolour} writing in ${penMemory.inHandIsOrange ? '#ff8c00' : 'something else'}`);
+  check('so picking up another pen and coming back finds it still there',
+    penMemory.redIsShipped === true && penMemory.remembered === true,
+    `black came back as ${penMemory.blackCameBackAs}, wanted #ff8c00 (it shipped as ${penMemory.shipped?.black}) — ` +
+    `the shipped colour here means the choice was never stored`);
+  check('and the tray shows the colour it will write in, not the one it shipped with',
+    penMemory.trayShowsOrange === true, `the black pen's button is painted ${penMemory.trayPaint}, wanted #ff8c00`);
+  check('the pen in your hand is the only one lit, even when two share a colour',
+    penMemory.trayLitTheRightPen === true && penMemory.onlyOneLit === true &&
+    penMemory.bothOrange === true && penMemory.heldIsRedNotBlack === true &&
+    penMemory.sameColourStillOneLit === true,
+    `both set to orange: ${penMemory.bothOrange}, hand holds ${penMemory.heldIsRedNotBlack ? 'red' : 'the wrong pen'}, ` +
+    `only one lit: ${penMemory.sameColourStillOneLit} — matching by colour used to light both`);
+  check('the choice is written to the settings file, so it outlives the session',
+    penMemory.savedToDisk === true && penMemory.savedActivePen != null,
+    `saved pens hold the recolour: ${penMemory.savedToDisk}, saved pen in hand: ${penMemory.savedActivePen}`);
+  check('and the number keys reach the recoloured pen, not the shipped one',
+    penMemory.digitGaveTheRecoloured === true,
+    `pressing 1 gave ${penMemory.digitGave}, wanted #ff8c00`);
+  check('putting a pen back to its shipped colour stores nothing to carry forever',
+    penMemory.forgottenWhenPutBack === true,
+    `nothing left behind for the black pen: ${penMemory.forgottenWhenPutBack}`);
   check('an infinite board is still free to roam', padCam.infiniteStillFree === true);
 
   /* ---- the bottom controls never sit on top of each other ---- *
@@ -3356,6 +6633,15 @@ async function run(win, app) {
     r.releaseBeatsPre = t('2.1.0', '2.1.0-beta.1') && !t('2.1.0-beta.1', '2.1.0');
     r.junkIsNot  = !t('garbage', '2.1.0') && !t('2.1', '2.0.0') && !t('', '2.0.0') && !t(null, '2.1.0') && !t('2.1.0', null);
     r.buildMeta  = t('2.1.0+build9', '2.0.0');
+    // Every Android build of one version differs only by the trailing number,
+    // so two prereleases of the same version have to be told apart.
+    r.androidBuilds = t('2.6.6-android.2', '2.6.6-android.1')
+      && !t('2.6.6-android.1', '2.6.6-android.2')
+      && !t('2.6.6-android.1', '2.6.6-android.1');
+    r.androidCounts = t('2.6.6-android.10', '2.6.6-android.2');   // not text order
+    r.androidVersionFirst = t('2.6.7-android.1', '2.6.6-android.9');
+    r.desktopStillWins = t('2.6.6', '2.6.6-android.9') && !t('2.6.6-android.9', '2.6.6');
+    r.shorterPreIsOlder = t('2.1.0-beta.1', '2.1.0-beta');
     r.parsed     = parseVersion('v2.10.3-rc.1');
 
     // consent gates the call: with the question unanswered, nothing goes out
@@ -3372,10 +6658,76 @@ async function run(win, app) {
     a.settings.updateCheck = false;
     r.refusedWhenOff = (await a.checkForUpdates({ silent: true })) === null;
 
-    // and the daily limit holds
+    // and the limit between checks holds
     a.settings.updateCheck = true;
     a.settings.lastUpdateCheck = Date.now();
     r.rateLimited = (await a.checkForUpdates({ silent: true })) === null;
+
+    /*
+     * Pin the gap itself, not just "a check just now is refused".
+     *
+     * The number lives in one place and the wording people read lives in two
+     * others, so it is the kind of thing that gets changed in one of the three.
+     * An hour either side of the boundary says which way it moved.
+     */
+    const HOUR = 60 * 60 * 1000;
+    const gap = a.constructor.UPDATE_INTERVAL;
+    r.interval = gap;
+
+    /*
+     * Answer for GitHub for the rest of this block.
+     *
+     * Consent, the gap between looks and what happens when the network is not
+     * there are all worth pinning down, and none of them should depend on what
+     * was released today or on there being a network at all. 0.0.1 is older
+     * than any build, so nothing here can pop a dialog into the suite.
+     */
+    let asked = 0;
+    let reply = { ok: true, version: '0.0.1', prerelease: false, url: '#' };
+    a.fetchUpdate = async () => { asked++; return reply; };
+    const triedAfter = async (since) => {
+      a.settings.lastUpdateCheck = since;
+      const was = asked;
+      await a.checkForUpdates({ silent: true });
+      return asked > was;
+    };
+    r.blockedJustInside = (await triedAfter(Date.now() - (gap - HOUR))) === false;
+    r.allowedJustOutside = (await triedAfter(Date.now() - (gap + HOUR))) === true;
+
+    // forcing ignores the gap entirely, however recently it last looked
+    a.settings.lastUpdateCheck = Date.now();
+    const beforeForce = asked;
+    await a.checkForUpdates({ silent: true, force: true });
+    r.forceIgnoresTheGap = asked > beforeForce;
+
+    // a real answer starts the clock
+    a.settings.lastUpdateCheck = 0;
+    reply = { ok: true, version: '0.0.1', prerelease: false, url: '#' };
+    await a.checkForUpdates({ silent: true });
+    r.successStartsTheClock = a.settings.lastUpdateCheck > 0;
+
+    /*
+     * A failed attempt must NOT start it. Off the network for the one minute
+     * the app happened to open, and the old code would sit out the whole gap
+     * believing it had already looked.
+     */
+    const stamp = Date.now() - (gap + HOUR);
+    a.settings.lastUpdateCheck = stamp;
+    reply = { ok: false, error: 'no network' };
+    const beforeFail = asked;
+    await a.checkForUpdates({ silent: true });
+    r.failureWasAttempted = asked > beforeFail;
+    r.failureKeepsTheClock = a.settings.lastUpdateCheck === stamp;
+    const beforeRetry = asked;
+    await a.checkForUpdates({ silent: true });
+    r.failureRetriesNextTime = asked > beforeRetry;
+    // and a reply that is not an object at all is treated the same way
+    reply = null;
+    a.settings.lastUpdateCheck = stamp;
+    await a.checkForUpdates({ silent: true });
+    r.junkReplyKeepsTheClock = a.settings.lastUpdateCheck === stamp;
+
+    delete a.fetchUpdate;
 
     // the suite must never be interrupted by the consent dialog
     const info = await a.appInfo();
@@ -3393,6 +6745,24 @@ async function run(win, app) {
     res.setHeader('content-type', 'application/json');
     if (req.url.includes('broken')) { res.statusCode = 500; res.end('nope'); return; }
     if (req.url.includes('garbage')) { res.end('{"not_a_release":true}'); return; }
+    // A list in the order GitHub actually returns it: newest first, with the
+    // phone builds - which are not desktop releases at all - sitting on top.
+    if (req.url.includes('mixed')) {
+      res.end(JSON.stringify([
+        { tag_name: 'android-99.9.9-v2', name: 'Android build 2', prerelease: false, draft: false },
+        { tag_name: 'android-99.9.9-v1', name: 'Android build 1', prerelease: false, draft: false },
+        { tag_name: 'v99.9.9', name: 'GazBoard v99.9.9', prerelease: false, draft: false },
+        { tag_name: 'v99.10.0', name: 'A draft nobody published', prerelease: false, draft: true },
+        { tag_name: 'v99.8.0', name: 'GazBoard v99.8.0', prerelease: false, draft: false }
+      ]));
+      return;
+    }
+    if (req.url.includes('androidonly')) {
+      res.end(JSON.stringify([
+        { tag_name: 'android-99.9.9-v2', name: 'Android build 2', prerelease: false, draft: false }
+      ]));
+      return;
+    }
     res.end(JSON.stringify({ tag_name: 'v99.9.9', name: 'GazBoard v99.9.9', prerelease: false }));
   });
   await new Promise((r) => fakeHub.listen(0, '127.0.0.1', r));
@@ -3416,6 +6786,13 @@ async function run(win, app) {
   const broke = await js(`return await window.board.checkForUpdate();`);
   process.env.GAZBOARD_UPDATE_API = hubUrl('garbage');
   const junk = await js(`return await window.board.checkForUpdate();`);
+  process.env.GAZBOARD_UPDATE_API = hubUrl('mixed');
+  const mixed = await js(`
+    const x = await window.board.checkForUpdate();
+    return { ok: x.ok, version: x.version, url: x.url };
+  `);
+  process.env.GAZBOARD_UPDATE_API = hubUrl('androidonly');
+  const androidOnly = await js(`return await window.board.checkForUpdate();`);
   process.env.GAZBOARD_UPDATE_API = 'http://127.0.0.1:1/nothing-listening';
   const dead = await js(`return await window.board.checkForUpdate();`);
   delete process.env.GAZBOARD_UPDATE_API;
@@ -3429,6 +6806,17 @@ async function run(win, app) {
   check('a server error is reported, not thrown', broke.ok === false && !!broke.error, JSON.stringify(broke));
   check('a reply that is not a release is refused', junk.ok === false, JSON.stringify(junk));
   check('being offline is handled quietly', dead.ok === false && !!dead.error, JSON.stringify(dead));
+  check('one Android build is told apart from the next', upd.androidBuilds === true, JSON.stringify(upd.androidBuilds));
+  check('Android build 10 counts as later than build 2', upd.androidCounts === true);
+  check('a later version beats a higher build of an older one', upd.androidVersionFirst === true);
+  check('a finished release still beats any build of it', upd.desktopStillWins === true);
+  check('a longer prerelease suffix ranks later', upd.shorterPreIsOlder === true);
+  check('an Android release at the top of the list does not hide the desktop one',
+    mixed.ok === true && mixed.version === '99.9.9'
+      && mixed.url === 'https://github.com/fahim9778/GazBoard/releases/tag/v99.9.9',
+    JSON.stringify(mixed));
+  check('a list with no desktop release at all is refused rather than guessed at',
+    androidOnly.ok === false, JSON.stringify(androidOnly));
 
   const updUi = await js(`
     const a = window.app;
@@ -3525,7 +6913,27 @@ async function run(win, app) {
   check('build metadata does not confuse the comparison', upd.buildMeta === true);
   check('the update check does nothing until it has been allowed',
     upd.refusedWhenOff === true, JSON.stringify(upd));
-  check('and not more than once a day', upd.rateLimited === true);
+  check('and not more than once every twelve hours', upd.rateLimited === true);
+  check('the gap between checks is twelve hours', upd.interval === 12 * 60 * 60 * 1000,
+    `the gap is ${Math.round((upd.interval || 0) / 3600000)}h (${upd.interval}ms), wanted 12h`);
+  check('an hour before the gap is up it still says nothing', upd.blockedJustInside === true,
+    `checked ${Math.round((upd.interval - 3600000) / 3600000)}h ago, refused: ${upd.blockedJustInside}`);
+  check('and an hour after the gap is up it looks again', upd.allowedJustOutside === true,
+    `checked ${Math.round((upd.interval + 3600000) / 3600000)}h ago, looked again: ${upd.allowedJustOutside}`);
+  check('asking by hand ignores the gap completely', upd.forceIgnoresTheGap === true,
+    `forced a check one moment after the last one, went through: ${upd.forceIgnoresTheGap}`);
+  check('a real answer starts the clock', upd.successStartsTheClock === true,
+    `lastUpdateCheck moved off zero after a good reply: ${upd.successStartsTheClock}`);
+  check('a check that could not reach GitHub does not start the clock',
+    upd.failureWasAttempted === true && upd.failureKeepsTheClock === true,
+    `attempted: ${upd.failureWasAttempted}, clock left alone: ${upd.failureKeepsTheClock} ` +
+    `— a failed attempt is not a look, so half a day must not be spent believing it was`);
+  check('and the next launch tries again instead of sitting out the gap',
+    upd.failureRetriesNextTime === true,
+    `second attempt went out: ${upd.failureRetriesNextTime}`);
+  check('a reply that is not an answer at all is treated as a failure',
+    upd.junkReplyKeepsTheClock === true,
+    `clock left alone after a null reply: ${upd.junkReplyKeepsTheClock}`);
   check('the suite is never interrupted by the consent question',
     upd.smokeFlag === true && upd.startFlowNoOp === true, JSON.stringify(upd));
 
@@ -3654,6 +7062,96 @@ async function run(win, app) {
   check('exports do not contain the laser', laser.exportIgnoresLaser === true);
   check('switching tools clears the laser', laser.clearedOnToolChange === true);
 
+  /* ---- the tail retires one point at a time, and a flick is born bright ---- */
+  const laserTimes = await js(`
+    const a = window.app;
+    const r = {};
+    a.newBoard(true);
+    const sf = a.surface, inter = a.interaction, cam = sf.cam;
+    a.setTool('laser');
+    const box = sf.canvas.getBoundingClientRect();
+    const scr = (w) => ({ x: w.x * cam.z + cam.x, y: w.y * cam.z + cam.y });
+    /*
+     * A pointermove the way a high-rate pen really delivers one: several
+     * samples handed over together, each carrying the moment it was taken.
+     */
+    const packet = (pts) => ({
+      getCoalescedEvents: () => pts.map((p) => {
+        const s = scr(p);
+        return { clientX: box.left + s.x, clientY: box.top + s.y, timeStamp: p.t };
+      })
+    });
+
+    inter.onDown({ pointerId: 1, pointerType: 'pen', button: 0, buttons: 1,
+                   clientX: box.left, clientY: box.top, isPrimary: true,
+                   preventDefault(){}, getCoalescedEvents: null });
+    inter.action = { type: 'laser' };
+
+    /*
+     * Four samples taken 4ms apart, all delivered on one frame. Each must keep
+     * a time of its own: one shared time means the whole packet drops off the
+     * end of the trail on a single frame, which is what made the tail look
+     * like it was losing square chunks rather than fading.
+     */
+    sf.laser = [];
+    const t0 = performance.now();
+    const four = [{ x: 100, y: 100, t: t0 - 12 }, { x: 140, y: 110, t: t0 - 8 },
+                  { x: 180, y: 120, t: t0 - 4 }, { x: 220, y: 130, t: t0 }];
+    const head = scr({ x: 220, y: 130 });
+    inter.applyMotion(head, {}, packet(four));
+    r.kept = sf.laser.length;
+    r.distinctTimes = new Set(sf.laser.map((p) => p.t)).size;
+    r.timesGoForward = sf.laser.every((p, i, all) => i === 0 || p.t >= all[i - 1].t);
+    r.spread = Math.round(sf.laser[sf.laser.length - 1].t - sf.laser[0].t);
+
+    /*
+     * Now the pointer rests, and then flicks. The samples in that flick were
+     * all taken just now, so every one of them has to arrive bright. Dating
+     * them across the pause instead would have the oldest arrive most of the
+     * way through its life and die almost immediately.
+     */
+    sf.laser = [{ x: 0, y: 0, t: performance.now() - 400 }];
+    const t1 = performance.now();
+    const flick = [{ x: 300, y: 300, t: t1 - 12 }, { x: 340, y: 310, t: t1 - 8 },
+                   { x: 380, y: 320, t: t1 - 4 }, { x: 420, y: 330, t: t1 }];
+    inter.applyMotion(scr({ x: 420, y: 330 }), {}, packet(flick));
+    const LIFE = sf.constructor.LASER_LIFE;
+    const fresh = sf.laser.slice(1);
+    const nowish = performance.now();
+    r.flickPoints = fresh.length;
+    r.oldestFlickAge = Math.round(nowish - Math.min(...fresh.map((p) => p.t)));
+    r.dimmestFlick = Math.round(100 * Math.min(...fresh.map((p) => 1 - (nowish - p.t) / LIFE)));
+    r.flickTimesGoForward = sf.laser.every((p, i, all) => i === 0 || p.t >= all[i - 1].t);
+
+    /*
+     * An engine that reports no usable time at all must not lay down a point
+     * that is already dead - it falls back to the moment it arrived.
+     */
+    sf.laser = [];
+    inter.applyMotion(scr({ x: 500, y: 500 }), {}, packet([{ x: 500, y: 500, t: 0 }]));
+    r.junkStampAge = Math.round(performance.now() - sf.laser[0].t);
+
+    inter.action = null;
+    sf.laser = [];
+    a.setTool('select'); a.newBoard(true);
+    return r;
+  `);
+  check('one packet of pen samples keeps a separate time for each point',
+    laserTimes.kept >= 4 && laserTimes.distinctTimes === laserTimes.kept,
+    `${laserTimes.kept} point(s) kept carrying ${laserTimes.distinctTimes} different time(s), ` +
+    `spread over ${laserTimes.spread}ms — one shared time means the whole packet leaves the trail on one frame`);
+  check('and those times only ever go forwards',
+    laserTimes.timesGoForward === true,
+    `pruning walks the trail from the front, so a time that went backwards would strand every point behind it`);
+  check('a flick after the pointer has rested arrives bright, not half faded',
+    laserTimes.dimmestFlick >= 90 && laserTimes.flickTimesGoForward === true,
+    `${laserTimes.flickPoints} new point(s), the oldest ${laserTimes.oldestFlickAge}ms old and drawn at ` +
+    `${laserTimes.dimmestFlick}% brightness (wanted 90% or more) — dating a fresh packet across the pause ` +
+    `before it is what makes a flick appear already fading`);
+  check('a sample with no usable time of its own still starts its full life',
+    laserTimes.junkStampAge < 50,
+    `laid down ${laserTimes.junkStampAge}ms old — an unusable timestamp must fall back to now, not to zero`);
+
   /* ---- writing on imported pages stays cheap ---- *
    * Every pointer move used to repaint the whole board, page bitmaps and all.
    * With a document imported across many sheets that is a lot of redrawing for
@@ -3679,6 +7177,18 @@ async function run(win, app) {
     const sf = a.surface, inter = a.interaction, cam = sf.cam;
     a.goToPage(4);
     await new Promise(res => requestAnimationFrame(() => requestAnimationFrame(res)));
+    // Jumping to page 4 moved the board, so the frozen copy is out of date and
+    // a rebuild is queued for the next quiet moment. Let it finish before the
+    // counting starts: this test is about what a STROKE costs, and the rebuild
+    // in the gap before it has a test of its own further down.
+    const settle = async (cap = 4000) => {
+      const t0 = performance.now();
+      while (sf._warming != null && performance.now() - t0 < cap) {
+        await new Promise((res) => setTimeout(res, 16));
+      }
+      await new Promise((res) => requestAnimationFrame(res));
+    };
+    await settle();
     const rm = rects[4];
     const scr = (w) => ({ x: w.x * cam.z + cam.x, y: w.y * cam.z + cam.y });
 
@@ -3686,7 +7196,8 @@ async function run(win, app) {
     const real = sf._freezeScene.bind(sf);
     sf._freezeScene = function (k) { froze++; return real(k); };
 
-    // one stroke of 50 moves must freeze the scene once, not fifty times
+    // one stroke of 50 moves must not freeze the scene at all: the copy was
+    // made ready in the gap before the pen landed, and fifty moves reuse it
     inter.startStroke({ pointerType: 'pen', pressure: .6 }, { x: rm.x + 60, y: rm.y + 300 }, 'pen');
     for (let i = 1; i <= 50; i++) {
       inter.applyMotion(scr({ x: rm.x + 60 + i * 10, y: rm.y + 300 }), {}, null);
@@ -3699,17 +7210,29 @@ async function run(win, app) {
     // would appear to stick while auto-pan scrolled it
     cam.panBy(-40, 0);
     sf.draw();
-    r.refrozeAfterPan = froze === 2;
+    r.refrozeAfterPan = froze === 1;
 
     // and when the document changes beneath it
     a.store.add({ id: 'newthing', type: 'shape', kind: 'rect', x: rm.x + 100, y: rm.y + 100,
                   w: 80, h: 80, rotation: 0, stroke: '#000', fill: 'none', lineWidth: 2 }, 'x');
     sf.draw();
-    r.refrozeAfterEdit = froze === 3;
+    r.refrozeAfterEdit = froze === 2;
 
     if (inter.action) { inter.finishStroke(inter.action); inter.action = null; }
     sf.draw();
-    r.cacheDroppedWhenPenLifts = sf._ink === null;
+    // The stroke just finished is painted INTO the copy rather than voiding
+    // it, so what is held is still a true picture of the board as it now is.
+    r.freezeStillTrueAfterPenLift = !!sf._ink && sf._ink.key === sf.freezeKey();
+    // ...which is only worth anything if the next stroke actually uses it
+    const beforeSecond = froze;
+    inter.startStroke({ pointerType: 'pen', pressure: .6 }, { x: rm.x + 60, y: rm.y + 360 }, 'pen');
+    for (let i = 1; i <= 6; i++) {
+      inter.applyMotion(scr({ x: rm.x + 60 + i * 10, y: rm.y + 360 }), {}, null);
+      sf.draw();
+    }
+    r.repaintsForSecondStroke = froze - beforeSecond;
+    if (inter.action) { inter.finishStroke(inter.action); inter.action = null; }
+    sf.draw();
     sf._freezeScene = real;
 
     a.newBoard(true); a.store.clear();
@@ -3725,11 +7248,194 @@ async function run(win, app) {
     ctxFlags.desynchronized === false && ctxFlags.setting === false && ctxFlags.alpha === false,
     JSON.stringify(ctxFlags));
 
-  check('a stroke freezes the board once, however many times the pen moves',
-    inkCache.freezesForOneStroke === 1 && inkCache.cachedMidStroke === true, JSON.stringify(inkCache));
+  check('fifty pen moves reuse one frozen board rather than repainting per move',
+    inkCache.freezesForOneStroke === 0 && inkCache.cachedMidStroke === true, JSON.stringify(inkCache));
   check('the frozen board is redrawn when the camera moves under the pen', inkCache.refrozeAfterPan === true);
   check('and when the document changes beneath it', inkCache.refrozeAfterEdit === true);
-  check('lifting the pen drops the frozen copy', inkCache.cacheDroppedWhenPenLifts === true);
+  check('the finished stroke joins the frozen copy instead of voiding it',
+    inkCache.freezeStillTrueAfterPenLift === true, JSON.stringify(inkCache));
+  check('so writing a second word does not repaint the whole board again',
+    inkCache.repaintsForSecondStroke === 0,
+    `${inkCache.repaintsForSecondStroke} full board repaints for the second stroke`);
+
+  /* ---- the frozen copy is rebuilt in the gap, not under the pen ---- */
+  /*
+   * The first stroke after a pan used to hitch, because the copy the pen draws
+   * on top of was built at the moment the pen landed. On a heavy board that is
+   * real work - measured at roughly 16us per visible stroke - and it happened
+   * during the one frame that must not be slow.
+   *
+   * There is always a gap between the board settling and the pen landing:
+   * reaction time, deciding where to write. warmFreeze() spends that gap
+   * building the copy, so the pen finds it waiting.
+   *
+   * Nothing here is timed. The assertions are about STATE after a settle, and
+   * about how many full repaints a stroke costs - both of which are the same
+   * on a build box with a software rasteriser as on a real GPU.
+   */
+  const warmFreeze = await js(`
+    const a = window.app;
+    const r = {};
+    a.newBoard(true); a.store.clear();
+    a.settings.autosave = false;
+
+    // a board heavy enough that a full repaint is genuine work
+    const bulk = [];
+    for (let i = 0; i < 900; i++) {
+      const bx = (i % 30) * 120, by = Math.floor(i / 30) * 70;
+      const pts = [];
+      for (let k = 0; k < 40; k++) pts.push({ x: bx + k * 3, y: by + Math.sin(k / 3) * 9, p: 0.55 });
+      bulk.push({ id: 'warm' + i, type: 'stroke', tool: 'pen', color: '#201f1e', width: 4,
+        effect: 'none', opacity: 1, rotation: 0, points: pts,
+        bbox: { x: bx, y: by - 9, w: 120, h: 18 } });
+    }
+    a.store.addMany ? a.store.addMany(bulk) : bulk.forEach((o) => a.store.add(o, 'x'));
+
+    const sf = a.surface, it = a.interaction, cam = sf.cam;
+
+    /*
+     * newBoard() does not finish with the camera: it queues a frame to open the
+     * board at 100% and centre it. That frame has not run yet. Setting the
+     * camera now and then awaiting anything lets the queued one land in the
+     * middle of the test and move the board out from under the copy being
+     * measured - which is exactly what it did, on a slower machine than the one
+     * this was written on: the copy was true when it was made and stale a
+     * moment later, and the test blamed the rebuild.
+     *
+     * So let the board finish opening first, then take the camera.
+     */
+    await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+    cam.z = 0.4; cam.x = 0; cam.y = 0;          // a lot of it on screen at once
+    sf.invalidate(); sf.draw();
+
+    let froze = 0;
+    const realFreeze = sf._freezeScene.bind(sf);
+    sf._freezeScene = function (k) { froze++; return realFreeze(k); };
+
+    // Waits for the queued rebuild to have RUN, however long the browser takes
+    // to find an idle moment. The assertion is on the state it leaves behind,
+    // never on how long it took.
+    const settle = async (cap = 4000) => {
+      const t0 = performance.now();
+      while (sf._warming != null && performance.now() - t0 < cap) {
+        await new Promise((res) => setTimeout(res, 16));
+      }
+      await new Promise((res) => requestAnimationFrame(res));
+      return sf._warming == null;
+    };
+
+    const rect = sf.canvas.getBoundingClientRect();
+    const mk = (x, y, buttons) => ({ pointerId: 77, pointerType: 'pen', button: 0,
+      buttons, pressure: 0.6, clientX: rect.left + x, clientY: rect.top + y,
+      shiftKey: false, altKey: false });
+    const oneStroke = (x0, y0) => {
+      it.action = null; it.pointers.clear();
+      const before = froze;
+      it.onDown(mk(x0, y0, 1));
+      sf.draw();                                  // the frame the pen lands on
+      for (let i = 1; i <= 5; i++) { it.onMove(mk(x0 + i * 4, y0 - i * 5, 1)); sf.draw(); }
+      it.onUp(mk(x0 + 20, y0 - 25, 0));
+      sf.draw();
+      it.action = null; it.pointers.clear();
+      return froze - before;
+    };
+    a.setTool('pen'); a.notePenSeen();
+
+    // --- 1. the pan leaves the held copy out of date ----------------------
+    // Without this the rest of the test proves nothing: if the copy were still
+    // valid after a pan, "valid after a settle" would be true for free.
+    cam.panBy(-260, -140);
+    sf.draw();
+    r.keyAfterPan = sf._ink ? sf._ink.key : '(no copy held)';
+    r.keyWanted = sf.freezeKey();
+    r.staleRightAfterPan = !sf._ink || sf._ink.key !== r.keyWanted;
+    r.rebuildWasQueued = sf._warming != null;
+
+    // --- 2. and the gap is spent making it current ------------------------
+    const camNow = () => cam.x + '|' + cam.y + '|' + cam.z;
+    const camBefore = camNow();
+    r.settled = await settle();
+    r.camMovedDuringSettle = camNow() !== camBefore ? camBefore + ' -> ' + camNow() : 'no';
+    r.keyAfterSettle = sf._ink ? sf._ink.key : '(no copy held)';
+    r.wantedAfterSettle = sf.freezeKey();
+    r.warmAfterSettle = !!sf._ink && sf._ink.key === r.wantedAfterSettle;
+
+    // --- 3. so the stroke that follows pays nothing -----------------------
+    r.freezesForWarmStroke = oneStroke(320, 300);
+
+    // --- 4. control: the same stroke with no gap to prepare in ------------
+    // Same board, same stroke, only the settle removed. If this is also 0 the
+    // test above is measuring something other than the warm copy.
+    cam.panBy(-90, -60);
+    sf.draw();                                    // queues a rebuild, not run yet
+    r.coldCopyStale = !sf._ink || sf._ink.key !== sf.freezeKey();
+    r.freezesForColdStroke = oneStroke(340, 320);
+    await settle();
+
+    // --- 5. a rebuild never runs under a moving pen -----------------------
+    // The live stroke owns the copy while it is down. A rebuild stepping in
+    // there would repaint the board underneath the ink.
+    it.action = null; it.pointers.clear();
+    it.onDown(mk(400, 340, 1));
+    it.onMove(mk(412, 330, 1));
+    sf.draw();
+    r.penIsDown = !!sf.wet;
+    const duringPen = froze;
+    sf.warmFreeze();                              // asked for at the worst moment
+    const ranWhileWet = await settle();
+    r.frozenWhilePenDown = froze - duringPen;
+    r.warmingClearedWhileWet = ranWhileWet;
+    it.onUp(mk(420, 322, 0));
+    sf.draw();
+    it.action = null; it.pointers.clear();
+
+    // --- 6. two pans in a row leave ONE copy, of where the board ended up --
+    // The key is read when the rebuild runs, not when it was queued, so a
+    // second pan mid-wait cannot leave a picture of somewhere the board
+    // already left.
+    await settle();
+    const beforePans = froze;
+    cam.panBy(-70, 0); sf.draw();
+    cam.panBy(-70, 0); sf.draw();
+    cam.panBy(0, -70); sf.draw();
+    await settle();
+    r.rebuildsForThreePans = froze - beforePans;
+    r.currentAfterPans = !!sf._ink && sf._ink.key === sf.freezeKey();
+
+    sf._freezeScene = realFreeze;
+    a.store.clear(); a.newBoard(true);
+    a.settings.autosave = true;
+    a.penSeenThisSession = false; a.setTool('select');
+    cam.z = 1; cam.x = 0; cam.y = 0;
+    it.action = null; it.pointers.clear();
+    return r;
+  `);
+  check('a pan leaves the frozen board copy out of date',
+    warmFreeze.staleRightAfterPan === true && warmFreeze.rebuildWasQueued === true,
+    `held ${warmFreeze.keyAfterPan}, view now wants ${warmFreeze.keyWanted}, ` +
+    `rebuild queued: ${warmFreeze.rebuildWasQueued}`);
+  check('and the quiet moment that follows is spent bringing it up to date',
+    warmFreeze.settled === true && warmFreeze.warmAfterSettle === true,
+    `after settle held ${warmFreeze.keyAfterSettle}, view wants ${warmFreeze.wantedAfterSettle}, ` +
+    `rebuild finished: ${warmFreeze.settled}, camera moved under the test: ${warmFreeze.camMovedDuringSettle} ` +
+    `(anything but "no" means something else moved the board, not that the rebuild was wrong)`);
+  check('so the stroke that lands next repaints the board not at all',
+    warmFreeze.freezesForWarmStroke === 0,
+    `${warmFreeze.freezesForWarmStroke} full board repaints during the stroke ` +
+    `(cold, with no gap to prepare in: ${warmFreeze.freezesForColdStroke})`);
+  check('which is the warm copy doing it, not the board being cheap to draw',
+    warmFreeze.coldCopyStale === true && warmFreeze.freezesForColdStroke === 1,
+    `copy stale before the cold stroke: ${warmFreeze.coldCopyStale}, ` +
+    `repaints it paid: ${warmFreeze.freezesForColdStroke} (warm stroke paid ${warmFreeze.freezesForWarmStroke})`);
+  check('a rebuild asked for under a moving pen stands aside',
+    warmFreeze.penIsDown === true && warmFreeze.frozenWhilePenDown === 0 &&
+    warmFreeze.warmingClearedWhileWet === true,
+    `pen down: ${warmFreeze.penIsDown}, repaints while it was: ${warmFreeze.frozenWhilePenDown}, ` +
+    `request cleared: ${warmFreeze.warmingClearedWhileWet}`);
+  check('three pans in a row cost one rebuild, of where the board ended up',
+    warmFreeze.rebuildsForThreePans === 1 && warmFreeze.currentAfterPans === true,
+    `${warmFreeze.rebuildsForThreePans} rebuilds for three pans, ` +
+    `copy matches the final view: ${warmFreeze.currentAfterPans}`);
 
   /* ---- a pad exports as a real multi-page PDF ---- */
   const padPdfPath = path.join(OUT, 'pad-3-pages.pdf');
@@ -4091,18 +7797,27 @@ async function run(win, app) {
     for (let i = 0; i < laserFrames; i++) sf.draw();
     const scenesPerLaserFrame = scenes;
     const froze = !!sf._ink;
-    sf.drawScene = realDrawScene;
 
-    // the trail is dropped the moment the laser is gone
+    // Once the trail is gone the board goes back to being painted for real.
+    // The copy itself is kept - it is just memory the right size, and the key
+    // decides whether it may be used - so what matters is that this frame is a
+    // repaint and not one more blit of something that could have gone stale.
     sf.laser = [];
+    scenes = 0;
     sf.draw();
-    const dropped = !sf._ink;
+    // Nothing changed while the trail faded, so that frame is allowed to be
+    // one more blit. What must be true is that the copy is a picture of THIS
+    // board - the key says so - and not something left over.
+    const trueAfterTrail = !!sf._ink && sf._ink.key === sf.freezeKey();
+    const paintsAfterTrail = scenes;
+    sf.drawScene = realDrawScene;
 
     const { Surface } = await import('app://board/js/core/surface.js');
     const life = Surface.LASER_LIFE;
 
     a.newBoard(true);
-    return { froze, dropped, life, scenesPerLaserFrame, laserFrames, objects: 1200 };
+    return { froze, trueAfterTrail, paintsAfterTrail, life, scenesPerLaserFrame,
+      laserFrames, objects: 1200 };
   `);
 
   check('the board is frozen under a live laser trail instead of redrawn every frame', laserPerf.froze);
@@ -4111,7 +7826,9 @@ async function run(win, app) {
     `${laserPerf.scenesPerLaserFrame} board repaints across ${laserPerf.laserFrames} laser frames - `
     + `${laserPerf.scenesPerLaserFrame * laserPerf.objects} objects redrawn instead of `
     + `${laserPerf.laserFrames * laserPerf.objects}`);
-  check('the frozen copy is thrown away as soon as the trail is gone', laserPerf.dropped);
+  check('what is left on screen once the trail is gone is this board, not a leftover',
+    laserPerf.trueAfterTrail === true,
+    `${laserPerf.paintsAfterTrail} board repaint(s) needed for that frame`);
   check('the trail fades quickly rather than trailing behind the pointer',
     laserPerf.life <= 600, `${laserPerf.life}ms`);
 
@@ -4545,9 +8262,20 @@ module.exports.run = async (win, app) => {
       { key: 'Escape', bubbles: true, cancelable: true }));
     const pointerOn = (el) => el.dispatchEvent(new PointerEvent('pointerdown',
       { bubbles: true, clientX: 5, clientY: 5 }));
-    // a real "somewhere else": the board itself
-    const clickBoard = () => sf.canvas.dispatchEvent(new PointerEvent('pointerdown',
-      { bubbles: true, clientX: 40, clientY: 40, pointerId: 77, pointerType: 'mouse', button: 0, buttons: 1 }));
+    /*
+     * A real "somewhere else": the board itself.
+     *
+     * The button has to come back UP. Pressing and never lifting leaves the
+     * app genuinely mid-gesture - a marquee being dragged out with the mouse
+     * still held - and everything after it then behaves the way it should for
+     * someone holding the button down, which is not what these checks mean to
+     * be testing.
+     */
+    const clickBoard = () => {
+      const at = { bubbles: true, clientX: 40, clientY: 40, pointerId: 77, pointerType: 'mouse', button: 0 };
+      sf.canvas.dispatchEvent(new PointerEvent('pointerdown', { ...at, buttons: 1 }));
+      sf.canvas.dispatchEvent(new PointerEvent('pointerup', { ...at, buttons: 0 }));
+    };
     const timed = (p, ms = 1500) => Promise.race([p, sleep(ms).then(() => 'TIMED OUT')]);
 
     /* --- the shortcuts list: the one that had to be scrolled to be closed --- */
@@ -4610,13 +8338,41 @@ module.exports.run = async (win, app) => {
     esc(); await sleep(20);
     r.panelEsc = !panelShown();
 
-    /* --- and with nothing layered, Escape still means "deselect" --- */
+    /* --- and with nothing layered, Escape still means "deselect" ---
+     *
+     * The tool is said out loud here. Escape now has a ladder of meanings -
+     * abandon what is being drawn, put down a tool that is armed to drop
+     * something, then deselect - so a test about deselecting has to say which
+     * rung it is standing on rather than inheriting a tool from whatever ran
+     * before it.
+     */
+    a.setTool('select');
     a.store.add({ id: 'b1', type: 'shape', kind: 'rect', x: 100, y: 100, w: 80, h: 60,
       rotation: 0, stroke: '#000', fill: '#eee', lineWidth: 2 }, 'seed');
     a.setSelection(['b1']);
     r.hadSelection = sf.selection.size === 1;
+    // What this press is landing on, so a failure says why rather than no.
+    r.why = {
+      tool: a.tool,
+      focus: document.activeElement ? document.activeElement.tagName : 'none',
+      editing: !!a.textEditor.active,
+      action: a.interaction.action ? a.interaction.action.type : null,
+      pointers: a.interaction.pointers.size,
+      overlay: shown(),
+      panel: panelShown(),
+      pop: !!document.querySelector('.pop')
+    };
     esc(); await sleep(20);
     r.escapeStillDeselects = sf.selection.size === 0;
+
+    // There is no "armed tool AND a selection" case to test: choosing a tool
+    // that drops something clears the selection on the way in, by design, so
+    // the two can never be pending at once. Escape only ever has one job.
+    a.setSelection(['b1']);
+    a.setTool('shape');
+    r.armingClearedTheSelection = sf.selection.size === 0;
+    esc(); await sleep(20);
+    r.escapePutTheToolDown = a.tool === 'select';
 
     // a dialog on top must NOT let Escape reach the board and clear a selection
     a.setSelection(['b1']);
@@ -4646,7 +8402,10 @@ module.exports.run = async (win, app) => {
     dismiss.panelOpen && dismiss.panelEsc && dismiss.boardClickCloses);
   check('but not on a click inside it, nor on the toolbar that toggles it',
     dismiss.insideKeepsItOpen && dismiss.toolbarKeepsItOpen);
-  check('with nothing layered, Escape still clears the selection',
+  check('arming a placement tool clears the selection, so Escape is never ambiguous',
+    dismiss.armingClearedTheSelection && dismiss.escapePutTheToolDown);
+  check('with nothing layered, Escape still clears the selection ' +
+    JSON.stringify(dismiss.why),
     dismiss.hadSelection && dismiss.escapeStillDeselects);
   check('and Escape aimed at a dialog does not reach through and clear it',
     dismiss.selectionSurvivedDialogEscape);
@@ -4765,6 +8524,17 @@ module.exports.run = async (win, app) => {
 
     hover(200, 300);
     await frame(); await frame();          // let any pending paint settle
+    // 300 strokes just landed on the board, so the frozen copy is out of date
+    // and a rebuild is waiting for a quiet moment. That rebuild is a full scene
+    // redraw and it is meant to be - it just is not the hover path, which is
+    // what is being counted here. Let it happen first.
+    {
+      const t0 = performance.now();
+      while (sf._warming != null && performance.now() - t0 < 4000) {
+        await new Promise((res) => setTimeout(res, 16));
+      }
+      await frame();
+    }
     scenes = 0;
 
     for (let i = 0; i < 60; i++) { hover(200 + i * 3, 300 + (i % 5)); }
@@ -4821,11 +8591,17 @@ module.exports.run = async (win, app) => {
     r.keptUp = seen[seen.length - 1] === 400;
     r.cursorStayedOff = sf.canvas.style.cursor === 'none';
 
+    const nibEl2 = document.getElementById('inkNib');
     it.onUp(mk(400, 300, 0));
     it.pointers.clear();
     r.afterLift = it.inkPointer ? Math.round(it.inkPointer.x) : null;
     r.systemCursorBack = String(sf.canvas.style.cursor).startsWith('url(');
-    const nibEl2 = document.getElementById('inkNib');
+    // Our copy is deliberately still up at this instant. The system cursor has
+    // been asked for but Windows has not necessarily drawn it yet, and both
+    // nibs at once is invisible while neither is a visible blink - see the
+    // handover note in showInkPointer().
+    r.overlappedForAFrame = !!nibEl2 && !nibEl2.hidden;
+    await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
     r.layerPutAway = !nibEl2 || nibEl2.hidden;
 
     // leaving the board takes it away rather than stranding it at the edge
@@ -4844,8 +8620,11 @@ module.exports.run = async (win, app) => {
   check('it keeps up with the pen rather than lagging behind it',
     nibDuringStroke.keptUp);
   check('and the system cursor takes it back the moment the pen lifts',
-    nibDuringStroke.systemCursorBack && nibDuringStroke.layerPutAway && nibDuringStroke.afterLift === null,
+    nibDuringStroke.systemCursorBack && nibDuringStroke.afterLift === null,
     `layer at ${nibDuringStroke.afterLift}`);
+  check('with our copy held over it for a frame, so the nib never blinks out',
+    nibDuringStroke.overlappedForAFrame && nibDuringStroke.layerPutAway,
+    `overlap ${nibDuringStroke.overlappedForAFrame}, put away ${nibDuringStroke.layerPutAway}`);
   check('but it goes away when the pointer leaves the board',
     nibDuringStroke.goneOnLeave);
 
@@ -4868,7 +8647,7 @@ module.exports.run = async (win, app) => {
     r.mouseCursor = String(sf.canvas.style.cursor).startsWith('url(') ? 'css-nib' : sf.canvas.style.cursor;
     r.mouseDrewNoNib = it.inkPointer === null;
 
-    it._penAt = 0;
+    it._penSp = null;
     it.onMove(mk(250, 300, 'pen', 0));
     r.penHoverCursor = String(sf.canvas.style.cursor).startsWith('url(') ? 'css-nib' : sf.canvas.style.cursor;
     r.penHoverUsedNoLayer = it.inkPointer === null;
@@ -4965,12 +8744,19 @@ module.exports.run = async (win, app) => {
 
   /* ---- snip a page, Ctrl+V, ink on it ---- */
   const pasted = await js(`
+   /*
+    * Declared outside the try, because the finally below has to reach both:
+    * the results so far, and what the clipboard held before any of this ran.
+    * Inside the try they are block-scoped and the restore throws instead of
+    * restoring - which is a failure that looks exactly like success.
+    */
+   const r = {};
+   let clipboardBefore = null;
    try {
     const a = window.app, sf = a.surface;
     a.newBoard(true);
     sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
     a.textEditor.cancel();
-    const r = {};
     const sleep = (ms) => new Promise(res => setTimeout(res, ms));
 
     // a 1600x900 "screenshot", the shape a snip of a book page tends to be
@@ -5001,11 +8787,15 @@ module.exports.run = async (win, app) => {
     // can actually draw on rather than filling the whole canvas
     r.scaledDown = !!img && Math.round(img.w) === 640 && Math.round(img.h) === 360;
 
-    // and it lands where you are looking, not off at the origin
-    const view = sf.cam.viewport(sf.width, sf.height);
+    // and it lands where the pointer is - or, with no pointer on the board yet,
+    // in the middle of what you are looking at. Same rule as everything else
+    // that arrives by paste; a picture is not a special case.
+    const want = a.pastePoint();
     r.centredInView = !!img
-      && Math.abs((img.x + img.w / 2) - (view.x + view.w / 2)) < 1
-      && Math.abs((img.y + img.h / 2) - (view.y + view.h / 2)) < 1;
+      && Math.abs((img.x + img.w / 2) - want.x) < 1
+      && Math.abs((img.y + img.h / 2) - want.y) < 1;
+    r.imageLandedAt = img ? Math.round(img.x + img.w / 2) + ',' + Math.round(img.y + img.h / 2) : 'none';
+    r.imageWanted = Math.round(want.x) + ',' + Math.round(want.y);
 
     // selected on arrival, so it can be moved or resized straight away
     r.selectedOnArrival = !!img && sf.selection.has(img.id);
@@ -5045,9 +8835,436 @@ module.exports.run = async (win, app) => {
     r.leftTheEditorAlone = a.store.objects.length === beforeCount;
     a.textEditor.cancel();
 
+    /*
+     * --- copying objects, and getting objects back ---
+     *
+     * Copy keeps the objects here and does NOT write to the machine's
+     * clipboard - whatever somebody had waiting there stays waiting. What it
+     * takes instead is a fingerprint of that clipboard, and paste compares it:
+     * unchanged means nothing has been copied anywhere since, so the objects
+     * are the most recent copy. The clipboard is genuinely written to below,
+     * so this exercises the real rule rather than a stand-in for it.
+     */
+    a.newBoard(true); a.textEditor.cancel(); a.setTool('select');
+    const mk = (id, text, x) => ({ id, type: 'note', x, y: 200, w: 160, h: 160,
+      color: '#ffd94a', text, rotation: 0 });
+    /*
+     * Putting something on the machine's clipboard and then reading it back is
+     * not instant on every platform. writeText() resolving means Chromium has
+     * handed it over, not that Windows has finished taking it - so waiting for
+     * the fingerprint to actually move is the difference between testing the
+     * rule and testing a race. Whether each write landed is recorded, so a
+     * failure says "the clipboard never took it" instead of blaming the board.
+     */
+    const settled = [];
+
+    /*
+     * Chromium refuses the clipboard to a window that is not the one in front:
+     * "Document is not focused". This suite opens a real window and runs for
+     * minutes, so anything that takes the foreground while it does - alt-tab, a
+     * notification, somebody picking their own machine back up - made every one
+     * of these writes fail and took eight checks down with it, all of them
+     * blaming the board for something the operating system had decided.
+     *
+     * Asking the window back to the front was the first attempt and it does not
+     * work, nor should it: an app cannot take focus away from whatever a person
+     * is actually using. So the values go onto the clipboard through Electron
+     * instead - the very same clipboard the fingerprint is read from, and one
+     * with no focus rule at all. Nothing about what is being tested moves: the
+     * machine's clipboard really does end up holding the value, and the board
+     * really does have to work out who copied last. The suite just stops
+     * needing to own the screen while it runs.
+     */
+    const native = (() => { try { return window.board?.clipboardWriteForTests || null; } catch { return null; } })();
+    r.usedNativeClipboard = !!native;
+    const asDataUrl = (blob) => new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(fr.result);
+      fr.onerror = () => rej(fr.error);
+      fr.readAsDataURL(blob);
+    });
+    /*
+     * The old route is kept for a build that has no test hook - a web run, or
+     * somebody opening the app normally and pasting this in by hand. It still
+     * needs the window in front, and still says so when it does not get it.
+     */
+    let refusedForFocus = false;
+    const putOnMachineClipboard = async (payload) => {
+      if (native) return native(payload) === true;
+      try {
+        if (payload.image) {
+          const blob = await (await fetch(payload.image)).blob();
+          await navigator.clipboard.write([new ClipboardItem({ [payload.type || blob.type]: blob })]);
+        } else {
+          await navigator.clipboard.writeText(payload.text);
+        }
+        return true;
+      } catch (e) {
+        if (/not focused|NotAllowed/i.test(String(e && e.message || e))) refusedForFocus = true;
+        return false;
+      }
+    };
+
+    const putText = async (value) => {
+      const was = a.clipboardStamp();
+      if (!(await putOnMachineClipboard({ text: value }))) { settled.push(false); return false; }
+      for (let i = 0; i < 150; i++) {
+        const now = a.clipboardStamp();
+        if (now !== was && (now || '').includes(value)) { settled.push(true); return true; }
+        await sleep(20);
+      }
+      settled.push(false);
+      return false;
+    };
+    const putImage = async (blob, type = 'image/png') => {
+      const was = a.clipboardStamp();
+      let dataUrl;
+      try { dataUrl = await asDataUrl(blob); } catch { settled.push(false); return false; }
+      if (!(await putOnMachineClipboard({ image: dataUrl, type }))) { settled.push(false); return false; }
+      for (let i = 0; i < 150; i++) {
+        if (a.clipboardStamp() !== was) { settled.push(true); return true; }
+        await sleep(20);
+      }
+      settled.push(false);
+      return false;
+    };
+
+    /*
+     * Whatever is on the machine's clipboard right now, kept so it can be put
+     * back. This probe writes half a dozen real values to the real clipboard,
+     * and without this the suite quietly destroys whatever the person running
+     * it had copied - then leaves its own sample line sitting there, ready to
+     * be pasted into something that matters an hour later.
+     */
+    clipboardBefore = await (async () => {
+      try { return await window.board?.clipboardRead?.() ?? null; } catch { return null; }
+    })();
+
+    const EARLIER = 'something copied earlier, in another app';
+    await putText(EARLIER);
+    r.stampReadable = typeof a.clipboardStamp() === 'string';
+
+    a.store.add(mk('n1', 'alpha', 100));
+    a.store.add(mk('n2', 'beta', 400));
+    a.setSelection(['n1', 'n2']);
+    a.command('edit.copy');
+    r.copiedCount = a.clipboard.length;
+    r.newestAfterCopy = a.boardCopyIsNewest();
+    r.clipboardUndisturbed = (((await a.clipboardNow()) || {}).text ?? '(unreadable)') === EARLIER;
+
+    const before = a.store.objects.length;
+    firePaste(dt => dt.setData('text/plain', EARLIER));
+    await sleep(60);
+    const added = a.store.objects.slice(before);
+    r.pastedCount = added.length;
+    r.pastedNotes = added.filter(o => o.type === 'note').length;
+    r.pastedText = added.filter(o => o.type === 'text').length;
+    r.pastedWords = added.map(o => o.text).sort().join(',');
+    r.offsetFromOriginal = added.length === 2 && added.every(o => !['n1', 'n2'].includes(o.id));
+
+    // --- and it carries to another board ---
+    a.setSelection(['n1', 'n2']);
+    a.command('edit.copy');
+    a.newBoard(true); a.textEditor.cancel();
+    const empty = a.store.objects.length;
+    firePaste(dt => dt.setData('text/plain', EARLIER));
+    await sleep(60);
+    const landed = a.store.objects.slice(empty);
+    r.crossBoardCount = landed.length;
+    r.crossBoardWords = landed.map(o => o.text).sort().join(',');
+
+    /*
+     * --- something copied elsewhere AFTER ours takes priority back ---
+     *
+     * The rule that keeps this honest. Holding objects must never mean the
+     * machine's clipboard stops working - and losing priority must not mean
+     * the objects are thrown away either.
+     */
+    a.newBoard(true); a.textEditor.cancel();
+    a.store.add(mk('k1', 'ours', 100));
+    a.setSelection(['k1']);
+    a.command('edit.copy');
+    r.holdingAfterCopy = a.clipboard.length;
+
+    const LATER = 'https://example.com/from-the-browser';
+    await putText(LATER);
+    r.newestAfterSomeoneElse = a.boardCopyIsNewest();
+    const beforeOutside = a.store.objects.length;
+    firePaste(dt => dt.setData('text/plain', LATER));
+    await sleep(60);
+    const outside = a.store.objects.slice(beforeOutside);
+    r.outsideTextWins = outside.length === 1 && outside[0].type === 'text' && outside[0].text === LATER;
+
+    const beforePic = a.store.objects.length;
+    firePaste(dt => dt.items.add(file));
+    for (let i = 0; i < 200 && a.store.objects.length === beforePic; i++) await sleep(10);
+    r.outsideImageWins = a.store.objects.slice(beforePic).some(o => o.type === 'image');
+
+    // and our objects were never thrown away - the board menu still pastes them
+    r.stillHolding = a.clipboard.length;
+    const beforeOurs = a.store.objects.length;
+    // The browser line is newer than our objects, so a plain Paste would give
+    // that line. Putting our own copy back in front first is what the user
+    // does by copying again; here it is done directly.
+    a.setSelection(['k1']);
+    a.command('edit.copy');
+    await a.pasteAt({ x: 7000, y: 4000 });
+    const oursBack = a.store.objects.slice(beforeOurs);
+    r.oursStillAvailable = oursBack.length === 1 && oursBack[0].type === 'note' && oursBack[0].text === 'ours';
+
+    /*
+     * --- and the newer outside copy can be put on the board, at a point ---
+     *
+     * A phone has no Ctrl+V. If Paste in the board menu preferred the board's
+     * own copy, a phone number copied in a browser would have no way onto the
+     * board at all - worse than the gap the menu was added to close.
+     */
+    a.newBoard(true); a.textEditor.cancel();
+    a.store.add(mk('m1', 'mine', 100));
+    a.setSelection(['m1']);
+    a.command('edit.copy');
+    const NUMBER = '+880 1700 000000';
+    await putText(NUMBER);
+    const beforeNum = a.store.objects.length;
+    await a.pasteAt({ x: 2500, y: 1800 });
+    const num = a.store.objects.slice(beforeNum);
+    r.outsideTextAtPoint = num.length === 1 && num[0].type === 'text' && num[0].text === NUMBER;
+    r.outsideTextNearPoint = num.length === 1
+      && Math.abs((num[0].x + num[0].w / 2) - 2500) < 2;
+    r.objectsSurvivedThat = a.clipboard.length === 1;
+
+    /*
+     * --- an OLD picture must not beat a NEW board copy ---
+     *
+     * Asking "is there a picture on the clipboard?" before "whose copy is
+     * newer?" let a screenshot from an hour ago win against two notes copied a
+     * second ago, because a picture is a picture whenever it arrived.
+     */
+    a.newBoard(true); a.textEditor.cancel();
+    const asBlob = await new Promise(res => shot.toBlob(res, 'image/png'));
+    await putImage(asBlob);
+    a.store.add(mk('i1', 'newer', 100));
+    a.store.add(mk('i2', 'still newer', 400));
+    a.setSelection(['i1', 'i2']);
+    a.command('edit.copy');                       // objects copied AFTER the picture
+    const beforeOld = a.store.objects.length;
+    /*
+     * Timed to the moment the notes are actually on the board, not to the end
+     * of a fixed wait. The old reading was "paste, sleep 120ms, look at the
+     * clock" - so it measured the sleep and whatever else the machine happened
+     * to be doing during it, and a busy Windows PC could fail it without the
+     * paste being any slower.
+     */
+    const t0 = performance.now();
+    firePaste(dt => dt.items.add(file));
+    let landedAt = null;
+    while (performance.now() - t0 < 3000) {
+      if (a.store.objects.length > beforeOld) { landedAt = performance.now(); break; }
+      await sleep(5);
+    }
+    r.freshnessCostMs = landedAt === null ? null : Math.round(landedAt - t0);
+    await sleep(120);                    // anything late would show up in the count below
+    const afterOld = a.store.objects.slice(beforeOld);
+    r.oldPictureLoses = afterOld.length === 2 && afterOld.every(o => o.type === 'note');
+    r.oldPictureGot = afterOld.map(o => o.type).join(',') || '(nothing)';
+
+    // two same-sized pictures are still two different pictures
+    const other = document.createElement('canvas');
+    other.width = shot.width; other.height = shot.height;
+    const og = other.getContext('2d');
+    og.fillStyle = '#ffffff'; og.fillRect(0, 0, other.width, other.height);
+    og.fillStyle = '#d13438'; og.fillRect(200, 300, 700, 120);
+    const otherBlob = await new Promise(res => other.toBlob(res, 'image/png'));
+    a.setSelection(['i1']);
+    a.command('edit.copy');
+    const sameSizeBefore = a.clipboardStamp();
+    await putImage(otherBlob);
+    r.sameSizeDifferentPicture = a.clipboardStamp() !== sameSizeBefore;
+    r.beatenBySameSizePicture = a.boardCopyIsNewest() === false;
+
+    /*
+     * --- the Edit menu's Paste follows the same rule as everything else ---
+     */
+    a.newBoard(true); a.textEditor.cancel();
+    a.store.add(mk('e1', 'from the board', 100));
+    a.setSelection(['e1']);
+    a.command('edit.copy');
+    const MENU_LINE = 'typed into another window';
+    await putText(MENU_LINE);
+    const beforeMenu = a.store.objects.length;
+    await a.command('edit.paste');
+    const menuGot = a.store.objects.slice(beforeMenu);
+    r.menuPasteFollowsRule = menuGot.length === 1 && menuGot[0].type === 'text'
+      && menuGot[0].text === MENU_LINE;
+    r.menuPasteGot = menuGot.map(o => o.type).join(',') || '(nothing)';
+
+    /*
+     * --- Ctrl+V lands where the pointer is, not where the originals were ---
+     *
+     * Dropping the copies a nudge from their originals is duplicate, not
+     * paste. On a SECOND board it is worse: the copies keep the coordinates
+     * they had on the first, so something copied from a far corner arrives in
+     * the far corner of the new board, nowhere near what you are looking at.
+     */
+    a.newBoard(true); a.textEditor.cancel(); a.setTool('select');
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    const far = sf.cam.toWorld(0, 0);
+    a.store.add({ id: 'f1', type: 'note', x: far.x + 9000, y: far.y + 6000, w: 160, h: 160,
+      color: '#ffd94a', text: 'far away', rotation: 0 });
+    a.setSelection(['f1']);
+    a.command('edit.copy');
+
+    // the pointer is put somewhere on screen, as a real one would be
+    // through screenPoint, exactly as the app does - the canvas is not at the
+    // window's top left, so client coordinates are not screen coordinates
+    const atClient = (x, y) => { const sp = sf.screenPoint({ clientX: x, clientY: y });
+      return sf.cam.toWorld(sp.x, sp.y); };
+    const seen = atClient(420, 260);
+    it.onMove({ pointerId: 5, pointerType: 'mouse', button: 0, buttons: 0, pressure: 0,
+      clientX: 420, clientY: 260, preventDefault(){}, stopPropagation(){},
+      target: { setPointerCapture(){}, releasePointerCapture(){} } });
+    r.pointerRemembered = !!a.boardPoint
+      && Math.abs(a.boardPoint.x - seen.x) < 2 && Math.abs(a.boardPoint.y - seen.y) < 2;
+    r.pointerSeen = a.boardPoint ? Math.round(a.boardPoint.x) + ',' + Math.round(a.boardPoint.y) : 'none';
+    r.pointerWanted = Math.round(seen.x) + ',' + Math.round(seen.y);
+
+    const beforeHere = a.store.objects.length;
+    await a.pasteAt(null);
+    const here = a.store.objects.slice(beforeHere);
+    r.pastedAtPointer = here.length === 1
+      && Math.abs((here[0].x + here[0].w / 2) - seen.x) < 2
+      && Math.abs((here[0].y + here[0].h / 2) - seen.y) < 2;
+    r.pastedAwayFromOriginal = here.length === 1 && Math.abs(here[0].x - (far.x + 9000)) > 1000;
+
+    // --- and on a different board it still lands under the pointer ---
+    a.newBoard(true); a.textEditor.cancel();
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    const elsewhereWp = atClient(700, 400);
+    it.onMove({ pointerId: 5, pointerType: 'mouse', button: 0, buttons: 0, pressure: 0,
+      clientX: 700, clientY: 400, preventDefault(){}, stopPropagation(){},
+      target: { setPointerCapture(){}, releasePointerCapture(){} } });
+    const beforeOther = a.store.objects.length;
+    await a.pasteAt(null);
+    const onOther = a.store.objects.slice(beforeOther);
+    r.crossBoardAtPointer = onOther.length === 1
+      && Math.abs((onOther[0].x + onOther[0].w / 2) - elsewhereWp.x) < 2
+      && Math.abs((onOther[0].y + onOther[0].h / 2) - elsewhereWp.y) < 2;
+    r.crossBoardGotX = onOther.length === 1 ? Math.round(onOther[0].x) : null;
+
+    // --- pointer left long ago and the board has moved on: use the middle ---
+    sf.cam.x = -40000; sf.cam.y = -40000;
+    const view2 = sf.cam.viewport(sf.width, sf.height);
+    const beforeOff = a.store.objects.length;
+    await a.pasteAt(null);
+    const off = a.store.objects.slice(beforeOff);
+    r.offScreenFallsBackToMiddle = off.length === 1
+      && Math.abs((off[0].x + off[0].w / 2) - (view2.x + view2.w / 2)) < 2;
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+
+    /*
+     * --- a JPEG off the clipboard is a JPEG, not a mislabelled PNG ---
+     *
+     * Imports are checked against their own extension, which is worth keeping.
+     * But a picture from the clipboard has no name of its own, and calling
+     * every one clipboard.png meant a JPEG screenshot was turned away by our
+     * own honesty check: "clipboard.png is not the image it claims to be".
+     */
+    const { clipboardFileName } = await import('app://board/js/insert.js');
+    r.names = ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml', 'image/heic', '']
+      .map((t) => t + '->' + clipboardFileName(t)).join(' ');
+    r.jpegNamedJpg = clipboardFileName('image/jpeg') === 'clipboard.jpg';
+    r.pngNamedPng = clipboardFileName('image/png') === 'clipboard.png';
+    r.oddTypeSkipsTheCheck = clipboardFileName('image/heic') === 'clipboard'
+      && clipboardFileName('') === 'clipboard';
+
+    /*
+     * And a real JPEG lands rather than being skipped.
+     *
+     * Not through the machine's clipboard: Chromium refuses to write anything
+     * but a PNG to it, while Android hands a JPEG across the native bridge
+     * quite happily. So the file is built exactly as paste builds it and put
+     * through the same import - which is where the rejection happened.
+     */
+    a.newBoard(true); a.textEditor.cancel();
+    const { insertImageFiles } = await import('app://board/js/insert.js');
+    const jpegBlob = await new Promise(res => shot.toBlob(res, 'image/jpeg', 0.8));
+    const asPaste = new File([jpegBlob], clipboardFileName(jpegBlob.type), { type: jpegBlob.type });
+    r.jpegNamed = asPaste.name;
+    const beforeJpeg = a.store.objects.length;
+    await insertImageFiles(a, [asPaste], { x: 3000, y: 2000 });
+    for (let i = 0; i < 200 && a.store.objects.length === beforeJpeg; i++) await sleep(10);
+    const jpeg = a.store.objects.slice(beforeJpeg);
+    r.jpegLanded = jpeg.length === 1 && jpeg[0].type === 'image';
+    r.jpegGot = jpeg.map(o => o.type).join(',') || '(nothing)';
+
+    // the old naming, to prove the check being satisfied is not a coincidence
+    const asBefore = new File([jpegBlob], 'clipboard.png', { type: jpegBlob.type });
+    const beforeWrong = a.store.objects.length;
+    await insertImageFiles(a, [asBefore], { x: 3400, y: 2000 });
+    await sleep(80);
+    r.wrongNameRejected = a.store.objects.length === beforeWrong;
+
+    // --- cut takes them away and still lets them come back ---
+    a.newBoard(true); a.textEditor.cancel();
+    a.store.add(mk('c1', 'gone', 100));
+    a.setSelection(['c1']);
+    a.command('edit.cut');
+    r.cutRemoved = !a.store.get('c1');
+    const afterCut = a.store.objects.length;
+    firePaste(dt => dt.setData('text/plain', EARLIER));
+    await sleep(60);
+    const back = a.store.objects.slice(afterCut);
+    r.cutPastesBack = back.length === 1 && back[0].type === 'note' && back[0].text === 'gone';
+    r.everyClipboardWriteLanded = settled.every(Boolean);
+    r.clipboardWrites = settled.filter(Boolean).length + '/' + settled.length;
+    r.windowLostFocus = refusedForFocus;
+
+    /*
+     * --- pasting at a point, which is what a right-click or a held finger means ---
+     */
+    a.newBoard(true); a.textEditor.cancel();
+    a.store.add(mk('p1', 'here', 100));
+    a.store.add(mk('p2', 'there', 400));
+    a.setSelection(['p1', 'p2']);
+    a.command('edit.copy');
+    const spread = { minX: 100, maxX: 560 };            // two 160-wide notes at x 100 and 400
+    const wantCentre = { x: 5000, y: 3000 };
+    const beforeAt = a.store.objects.length;
+    await a.pasteAt(wantCentre);
+    const at = a.store.objects.slice(beforeAt);
+    r.pasteAtCount = at.length;
+    const box = at.reduce((b, o) => ({
+      minX: Math.min(b.minX, o.x), maxX: Math.max(b.maxX, o.x + o.w),
+      minY: Math.min(b.minY, o.y), maxY: Math.max(b.maxY, o.y + o.h)
+    }), { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
+    r.pasteAtCentre = { x: Math.round((box.minX + box.maxX) / 2), y: Math.round((box.minY + box.maxY) / 2) };
+    // the two notes keep their spacing rather than being stacked on the point
+    r.pasteAtKeptSpread = Math.round(box.maxX - box.minX) === (spread.maxX - spread.minX);
+
     a.setTool('select'); a.newBoard(true);
     return r;
-   } catch (e) { return { crashed: String(e && e.message || e) }; }
+   } catch (e) { r.crashed = String(e && e.message || e); return r; }
+   finally {
+    /*
+     * Put the machine's clipboard back exactly as it was found, even if the
+     * probe above fell over. A crash is no reason to keep somebody's copied
+     * text hostage.
+     */
+    try {
+      const put = window.board?.clipboardWriteForTests;
+      if (put) {
+        if (clipboardBefore && clipboardBefore.image) put({ image: clipboardBefore.image });
+        else if (clipboardBefore && clipboardBefore.text) put({ text: clipboardBefore.text });
+        else put({ clear: true });
+      }
+      const now = await (async () => {
+        try { return await window.board?.clipboardRead?.() ?? null; } catch { return null; }
+      })();
+      r.clipboardPutBack = (now?.text || '') === (clipboardBefore?.text || '')
+        && !!(now?.image) === !!(clipboardBefore?.image);
+      r.clipboardLeftBehind = (now?.text || '').slice(0, 60);
+    } catch { r.clipboardPutBack = false; }
+   }
   `);
   if (pasted.crashed) console.log('  paste probe threw:', pasted.crashed);
 
@@ -5055,14 +9272,119 @@ module.exports.run = async (win, app) => {
     pasted.landed && pasted.carriesThePixels);
   check('and arrives at a workable size rather than filling the canvas',
     pasted.scaledDown);
-  check('it lands where you are looking, already selected',
-    pasted.centredInView && pasted.selectedOnArrival);
+  check('it lands where the pointer is, already selected',
+    pasted.centredInView && pasted.selectedOnArrival,
+    `centred at ${pasted.imageLandedAt}, wanted ${pasted.imageWanted}; selected on arrival: ` +
+    `${pasted.selectedOnArrival}`);
   check('ink goes on top of the pasted picture, not under it',
     pasted.inkedOnIt && pasted.inkSitsAbove);
   check('text on the clipboard still pastes as text',
     pasted.textPasteWorks);
   check('pasting into a note being typed goes to the note, not the board',
     pasted.editorOpen && pasted.leftTheEditorAlone);
+  check('the machine clipboard took every value this test put on it',
+    pasted.everyClipboardWriteLanded === true,
+    `${pasted.clipboardWrites} writes landed within three seconds, written ` +
+    `${pasted.usedNativeClipboard ? 'straight to the machine clipboard (no focus needed)' : 'through the browser clipboard API, which needs the window in front'}` +
+    (pasted.windowLostFocus
+      ? ` — THE WINDOW WAS IN THE BACKGROUND and the browser refused. This build has no test hook; run the ` +
+        `suite from the repo with npm run test:all instead of pasting it into a normal window.`
+      : ` — anything less means the checks below were racing the operating system rather than testing the board`));
+  check('copying objects leaves the machine clipboard alone',
+    pasted.copiedCount === 2 && pasted.clipboardUndisturbed === true,
+    `${pasted.copiedCount} objects held; text already on the clipboard survived: ${pasted.clipboardUndisturbed}`);
+  check('and the board copy is the newest thing until something else is copied',
+    pasted.stampReadable === true && pasted.newestAfterCopy === true,
+    `clipboard fingerprint readable: ${pasted.stampReadable}, board copy newest: ${pasted.newestAfterCopy}`);
+  check('so pasting gives the objects back, not a text box of an older line',
+    pasted.pastedNotes === 2 && pasted.pastedText === 0,
+    `${pasted.pastedCount} arrived: ${pasted.pastedNotes} notes, ${pasted.pastedText} text boxes ` +
+    `(${pasted.pastedWords}) — a text box here means the machine clipboard won again`);
+  check('the pasted copies are new objects, not the originals',
+    pasted.offsetFromOriginal === true, `fresh ids: ${pasted.offsetFromOriginal}`);
+  check('objects copied on one board paste onto another',
+    pasted.crossBoardCount === 2 && pasted.crossBoardWords === 'alpha,beta',
+    `${pasted.crossBoardCount} landed on the new board (${pasted.crossBoardWords}), wanted 2: alpha,beta`);
+  check('text copied elsewhere AFTER a board copy takes priority back',
+    pasted.newestAfterSomeoneElse === false && pasted.outsideTextWins === true,
+    `board copy still claimed newest: ${pasted.newestAfterSomeoneElse} (wanted false); ` +
+    `the browser line pasted as text: ${pasted.outsideTextWins}`);
+  check('and a picture copied elsewhere wins too',
+    pasted.outsideImageWins === true, `pasted as an image: ${pasted.outsideImageWins}`);
+  check('a line copied elsewhere can still be pasted onto the board, where you pressed',
+    pasted.outsideTextAtPoint === true && pasted.outsideTextNearPoint === true,
+    `pasted as that text: ${pasted.outsideTextAtPoint}, centred on the point: ${pasted.outsideTextNearPoint} ` +
+    `— a phone has no Ctrl+V, so this menu is the only way onto the board`);
+  check('and the board copy survived being outranked',
+    pasted.objectsSurvivedThat === true,
+    `still holding ${pasted.objectsSurvivedThat ? 1 : 0} object(s) afterwards`);
+  check('a picture copied BEFORE the objects does not beat them',
+    pasted.oldPictureLoses === true,
+    `pasting gave ${pasted.oldPictureGot}, wanted note,note — an older screenshot winning here ` +
+    `means the clipboard is being looked at before it is asked whose copy is newer`);
+  check('two pictures the same size are told apart',
+    pasted.sameSizeDifferentPicture === true && pasted.beatenBySameSizePicture === true,
+    `fingerprint moved for a same-sized different picture: ${pasted.sameSizeDifferentPicture}, ` +
+    `board copy correctly outranked: ${pasted.beatenBySameSizePicture} ` +
+    `— comparing only the size would call this "no change"`);
+  /*
+   * Half a second is where a paste starts to feel like it hesitated. The work
+   * inside that is one full hash of a 1600x900 picture to decide whose copy is
+   * newer; a fast machine does it all in well under 100ms.
+   */
+  check('deciding that costs no noticeable time',
+    pasted.freshnessCostMs !== null && pasted.freshnessCostMs < 500,
+    pasted.freshnessCostMs === null
+      ? 'nothing landed on the board within three seconds of the paste'
+      : `${pasted.freshnessCostMs}ms from keypress to the objects on the board, including a full 1600x900 ` +
+        `image hash — allowed under 500ms`);
+  check('the Edit menu\'s Paste obeys the same rule as Ctrl+V',
+    pasted.menuPasteFollowsRule === true,
+    `edit.paste gave ${pasted.menuPasteGot}, wanted text — the menu used to reach straight ` +
+    `for the board's own copy and ignore anything newer`);
+  check('the board remembers where the pointer last was',
+    pasted.pointerRemembered === true,
+    `boardPoint holds ${pasted.pointerSeen}, the pointer was at ${pasted.pointerWanted}`);
+  check('Ctrl+V lands under the pointer, not beside the original',
+    pasted.pastedAtPointer === true && pasted.pastedAwayFromOriginal === true,
+    `centred on the pointer: ${pasted.pastedAtPointer}, and moved well away from the original: ` +
+    `${pasted.pastedAwayFromOriginal} — false means paste is behaving like duplicate`);
+  check('and on a different board it still lands under the pointer',
+    pasted.crossBoardAtPointer === true,
+    `landed at x=${pasted.crossBoardGotX}; keeping the old board's coordinates would put it ` +
+    `thousands of units away, off whatever you are looking at`);
+  check('with the pointer long gone, it uses the middle of the view',
+    pasted.offScreenFallsBackToMiddle === true,
+    `fell back to the middle after the board was panned away: ${pasted.offScreenFallsBackToMiddle}`);
+  check('a clipboard picture is named after what it actually is',
+    pasted.jpegNamedJpg === true && pasted.pngNamedPng === true && pasted.oddTypeSkipsTheCheck === true,
+    `names: ${pasted.names} — calling a JPEG clipboard.png makes our own sniffer reject it`);
+  check('so a JPEG off the clipboard actually lands on the board',
+    pasted.jpegLanded === true,
+    `named ${pasted.jpegNamed}, pasting gave ${pasted.jpegGot}, wanted image — "(nothing)" means ` +
+    `it was skipped as not the image it claims to be`);
+  check('and the same JPEG called clipboard.png is still turned away',
+    pasted.wrongNameRejected === true,
+    `the old naming was rejected: ${pasted.wrongNameRejected} — if this passes something other ` +
+    `than the name fixed it, and the sniffer has stopped doing its job`);
+  check('losing priority does not throw the copied objects away',
+    pasted.stillHolding === 1 && pasted.oursStillAvailable === true,
+    `still holding ${pasted.stillHolding} object(s); the board menu still pasted it: ${pasted.oursStillAvailable} ` +
+    `— clearing them here would silently kill Paste in the board menu, the only paste a phone has`);
+  check('cut removes the objects and paste brings them back',
+    pasted.cutRemoved === true && pasted.cutPastesBack === true,
+    `removed: ${pasted.cutRemoved}, came back as a note: ${pasted.cutPastesBack}`);
+  check('pasting at a point lands the copies centred on it',
+    pasted.pasteAtCount === 2 && pasted.pasteAtCentre.x === 5000 && pasted.pasteAtCentre.y === 3000,
+    `${pasted.pasteAtCount} objects, centred at ${JSON.stringify(pasted.pasteAtCentre)}, wanted {"x":5000,"y":3000}`);
+  check('and they keep their spacing instead of stacking on the spot',
+    pasted.pasteAtKeptSpread === true,
+    `kept the original 460-wide spread: ${pasted.pasteAtKeptSpread}`);
+  check('the suite gives the machine clipboard back the way it found it',
+    pasted.clipboardPutBack === true,
+    `what is on the clipboard now: "${pasted.clipboardLeftBehind}" — this probe writes real values to the ` +
+    `real clipboard, so leaving one there means whatever the person had copied is gone and a line of test ` +
+    `text is waiting to be pasted into something that matters`);
 
   /* ---- two files, one id: neither may eat the other ---- */
   const twoFiles = await js(`
@@ -5427,7 +9749,9 @@ module.exports.run = async (win, app) => {
   check('nothing has been announced and nobody is paired',
     syncOff.peers === 0 && syncOff.paired === 0);
 
-  await js(`window.app.panels.settings();`);
+  // Sharing has its own panel now - it was the heaviest thing in Settings
+  // (the firewall check shells out to PowerShell) and the hardest to find.
+  await js(`window.app.panels.sharing();`);
   await sleep(300);
   const syncPanel = await js(`
     const body = document.getElementById('panelBody');
@@ -5714,6 +10038,408 @@ module.exports.run = async (win, app) => {
   check('none of that switched sharing on behind your back',
     stillOff.running === false && stillOff.setting === false);
 
+  /*
+   * "Add a computer by address" has always asked for the address the other
+   * computer shows - while no computer showed one. Anybody who knew how to
+   * find it did not need the feature, and anybody who needed it was being sent
+   * to a command prompt. So the panel says it, on the machine it belongs to.
+   *
+   * Sharing has to be running for the panel to draw at all, so this switches
+   * it on, looks, and switches it back off.
+   */
+  await js(`
+    // The live block is drawn only when the setting is on, not merely when the
+    // service is running - the same thing a person switching it on does.
+    window.app.settings.sync = true;
+    await window.app.startSync();
+  `);
+  await sleep(600);
+  const shownAddress = await js(`
+    const st = await window.board.sync.state();
+    window.app.panels.sharing();
+    await new Promise((r) => setTimeout(r, 350));
+    const body = document.getElementById('panelBody');
+    const sec = [...body.querySelectorAll('.section')].find((s) => {
+      const t = s.querySelector('h5');
+      return t && t.textContent === 'Share on this network';
+    });
+    const text = sec ? sec.textContent : '';
+    const first = (st.addresses || [])[0];
+    return {
+      running: st.running,
+      count: (st.addresses || []).length,
+      shaped: (st.addresses || []).every((a) => {
+        const parts = String(a.address).split('.');
+        return !!a.name && parts.length === 4
+          && parts.every((n) => n !== '' && Number(n) >= 0 && Number(n) <= 255);
+      }),
+      onScreen: !!first && text.includes(first.address),
+      explains: /address/i.test(text),
+      copy: !!sec && [...sec.querySelectorAll('button')].some((b) => b.textContent === 'Copy'),
+      sample: first ? first.address : '(none)'
+    };
+  `);
+  check('sharing knows this computer\'s own address on the network',
+    shownAddress.count > 0 && shownAddress.shaped, `${shownAddress.count}: ${shownAddress.sample}`);
+  check('and the panel puts it on screen rather than sending anyone to a command prompt',
+    shownAddress.onScreen && shownAddress.explains, shownAddress.sample);
+  check('with a button to copy it, because typing four numbers off a screen goes wrong',
+    shownAddress.copy);
+
+  /*
+   * Watching a board arrive.
+   *
+   * The sender has always had a progress bar; the receiver had nothing at all,
+   * and a board carrying slides is tens of megabytes over classroom wifi. The
+   * hard constraint is that somebody may be MID-SENTENCE on the board when a
+   * colleague hits Send, so whatever shows this may not cover the canvas,
+   * steal focus, move the toolbar, or repaint the drawing.
+   */
+  const receiving = await js(`
+    const a = window.app, sf = a.surface;
+    a.newBoard(true);
+    const badge = document.getElementById('rxBadge');
+    const canvasBefore = sf.canvas.getBoundingClientRect();
+
+    // Count repaints of the actual board while a transfer runs.
+    let redraws = 0;
+    const realDraw = sf.draw.bind(sf);
+    sf.draw = function (...args) { redraws++; return realDraw(...args); };
+
+    const hiddenAtRest = !badge.classList.contains('show');
+    a.showReceiving({ id: 't1', name: "Rahim's PC", percent: 12 });
+    const early = { shown: badge.classList.contains('show'),
+      text: badge.querySelector('.rx-label').textContent };
+    a.showReceiving({ id: 't1', name: "Rahim's PC", percent: 64 });
+    const mid = badge.querySelector('.rx-ring').getAttribute('aria-valuenow');
+    a.showReceiving({ id: 't1', name: "Rahim's PC", percent: 100,
+      state: 'arrived', board: 'Week 6 - Sorting' });
+    const end = badge.querySelector('.rx-label').textContent;
+
+    const canvasAfter = sf.canvas.getBoundingClientRect();
+    // A failed transfer must clear itself rather than leave a stuck ring.
+    a.showReceiving({ id: 't2', name: 'Someone', percent: 40, state: 'failed' });
+    const afterFail = badge.classList.contains('show');
+
+    sf.draw = realDraw;
+    return { hiddenAtRest, early, mid, end, afterFail, redraws,
+      moved: Math.round(canvasAfter.width) !== Math.round(canvasBefore.width)
+        || Math.round(canvasAfter.height) !== Math.round(canvasBefore.height),
+      overCanvas: badge.getBoundingClientRect().bottom > canvasAfter.top + 1 };
+  `);
+  check('nothing is shown until a board is actually on its way', receiving.hiddenAtRest);
+  check('a board arriving names who is sending it, before it has finished',
+    receiving.early.shown && /Rahim/.test(receiving.early.text), receiving.early.text);
+  check('and the ring fills as it comes in', receiving.mid === '64', receiving.mid + '%');
+  check('the board names itself once it has arrived and been unsealed',
+    /Week 6 - Sorting/.test(receiving.end), receiving.end);
+  check('a transfer that fails clears itself instead of sticking', receiving.afterFail === false);
+  check('none of it repaints the board somebody may be writing on',
+    receiving.redraws === 0, receiving.redraws + ' repaints');
+  check('and the canvas is not moved or covered by it',
+    receiving.moved === false && receiving.overCanvas === false);
+
+  /*
+   * Being told, rather than having to notice.
+   *
+   * A ring that quietly fills in the corner is no use to somebody looking at
+   * their own handwriting. The report was: writing on the board, a colleague
+   * hits Send, and the first you know of it is an "accept this board?" dialog
+   * landing over your sentence.
+   *
+   * So the badge announces itself once - a brief pulse and two soft notes -
+   * and then settles down to being a ring. Once, at the start; a progress
+   * update must never set it off again.
+   */
+  const alerting = await js(`
+    const a = window.app, sf = a.surface;
+    const badge = document.getElementById('rxBadge');
+    a.settings.arrivalSound = true;
+
+    // Count chimes without making a sound in the test run.
+    let chimes = 0;
+    const realChime = a.playArrivalChime.bind(a);
+    a.playArrivalChime = () => { chimes++; };
+
+    let redraws = 0;
+    const realDraw = sf.draw.bind(sf);
+    sf.draw = function (...args) { redraws++; return realDraw(...args); };
+    const before = sf.canvas.getBoundingClientRect();
+
+    a._rxAnnounced = null;
+    a.showReceiving({ id: 'a1', name: 'Lab PC', percent: 3 });
+    const first = { alerting: badge.classList.contains('alert'), chimes };
+    a.showReceiving({ id: 'a1', name: 'Lab PC', percent: 41 });
+    a.showReceiving({ id: 'a1', name: 'Lab PC', percent: 77 });
+    const during = { chimes, stillOne: chimes === 1 };
+
+    // A second, separate board must announce itself again.
+    a.showReceiving({ id: 'a1', name: 'Lab PC', percent: 100, state: 'arrived', board: 'B' });
+    a.showReceiving({ id: 'a2', name: 'Lab PC', percent: 5 });
+    const second = chimes;
+
+    // Switched off, it stays silent - but still shows.
+    a.settings.arrivalSound = false;
+    a.playArrivalChime = realChime;          // the real one, which must return early
+    let threw = false;
+    try { a.playArrivalChime(); } catch { threw = true; }
+
+    const after = sf.canvas.getBoundingClientRect();
+    sf.draw = realDraw;
+    badge.classList.remove('alert', 'show');
+    a.settings.arrivalSound = true;
+    return { first, during, second, threw, redraws,
+      moved: Math.round(after.width) !== Math.round(before.width)
+        || Math.round(after.height) !== Math.round(before.height) };
+  `);
+  check('a board starting to arrive announces itself instead of waiting to be noticed',
+    alerting.first.alerting && alerting.first.chimes === 1);
+  check('and it says so once, not on every chunk that lands',
+    alerting.during.stillOne, alerting.during.chimes + ' chime(s) across three updates');
+  check('a second board announces itself in its own right', alerting.second === 2);
+  check('switching the sound off is silent rather than broken', alerting.threw === false);
+  check('none of the announcing repaints or moves the board either',
+    alerting.redraws === 0 && alerting.moved === false, alerting.redraws + ' repaints');
+
+  /*
+   * Three states, three colours, told apart at a glance from the back of a room.
+   *
+   * Amber while it is coming, solid orange for the first couple of seconds so
+   * it is caught out of the corner of an eye, green once it has landed.
+   * Deliberately not the app's own blue: everything else on that toolbar is
+   * blue, and one more blue thing is one the eye slides straight off.
+   */
+  const rxColour = await js(`
+    const a = window.app;
+    const badge = document.getElementById('rxBadge');
+    const seen = {};
+    const grab = () => {
+      const cs = getComputedStyle(badge);
+      return { bg: cs.backgroundColor, border: cs.borderTopColor, colour: cs.color };
+    };
+    a._rxAnnounced = null;
+    a.showReceiving({ id: 'c1', name: 'Lab PC', percent: 5 });
+    seen.alert = grab();
+    seen.alertClass = badge.classList.contains('alert');
+    badge.classList.remove('alert');          // as it does after ~2.6s
+    seen.during = grab();
+    a.showReceiving({ id: 'c1', name: 'Lab PC', percent: 100, state: 'arrived', board: 'B' });
+    seen.done = grab();
+    seen.doneClass = badge.classList.contains('done');
+    badge.classList.remove('show', 'done');
+    return seen;
+  `);
+  const warm = (c) => {
+    const m = /(\d+),\s*(\d+),\s*(\d+)/.exec(c || '');
+    return m ? Number(m[1]) > Number(m[3]) : false;      // more red than blue
+  };
+  check('a board on its way is amber, not one more blue thing on a blue toolbar',
+    warm(rxColour.during.border), rxColour.during.border);
+  check('the first seconds are filled in rather than outlined, to catch the eye',
+    rxColour.alertClass && rxColour.alert.bg !== rxColour.during.bg,
+    rxColour.alert.bg);
+  check('and a board that has landed goes green, so the two never look alike',
+    rxColour.doneClass && !warm(rxColour.done.border)
+    && rxColour.done.border !== rxColour.during.border,
+    rxColour.done.border);
+
+  /*
+   * Sharing has a button of its own.
+   *
+   * It was a section of Settings, which was wrong twice: buried four screens
+   * down past pen colours, for the one thing people open with a job in mind -
+   * and slow, because the firewall check shells out to PowerShell and Settings
+   * waited on it to change a nib.
+   */
+  const sharingPanel = await js(`
+    const a = window.app;
+    a.panels.close();
+    const btn = document.getElementById('btnShare');
+    const onBar = !!btn;
+    if (btn) btn.click();
+    await new Promise((r) => setTimeout(r, 400));
+    const titleEl = document.getElementById('panelTitle');
+    // Read as a STRING here. Keeping the node and reading it in the return
+    // value gave the title of whatever panel was open by then, which is how
+    // this check first "failed" against perfectly good code.
+    const title = titleEl ? titleEl.textContent : '';
+    const body = document.getElementById('panelBody');
+    const heads = [...body.querySelectorAll('h5')].map((e) => e.textContent);
+    const buttons = [...body.querySelectorAll('button')].map((b) => (b.textContent || '').trim());
+    a.panels.close();
+
+    // ...and Settings no longer carries it.
+    a.panels.settings();
+    await new Promise((r) => setTimeout(r, 300));
+    const setHeads = [...document.getElementById('panelBody').querySelectorAll('h5')]
+      .map((e) => e.textContent);
+    a.panels.close();
+    return { onBar, title, heads, buttons, setHeads };
+  `);
+  check('sharing has its own button on the top bar', sharingPanel.onBar);
+  check('and it opens a panel of its own, not a section of Settings',
+    /share/i.test(sharingPanel.title), sharingPanel.title);
+  check('Settings no longer builds the sharing section, so it opens at once',
+    !sharingPanel.setHeads.includes('Share on this network')
+    || sharingPanel.setHeads.filter((x) => x === 'Share on this network').length === 1,
+    sharingPanel.setHeads.join(' | '));
+  // Named the way somebody scans for it. "Start again" was mine, and vague:
+  // people look for the word "default", so that is the word on the heading.
+  check('the reset section is called what people look for',
+    sharingPanel.setHeads.some((x) => /reset to defaults/i.test(x)),
+    sharingPanel.setHeads.join(' | '));
+
+  /*
+   * "The same network", not "the same wifi".
+   *
+   * Half the machines this runs on are on a cable. A lecturer whose desktop is
+   * wired and whose laptop is on wifi reads "the same wifi" and concludes,
+   * reasonably, that sharing is not for them - when the two are on the same
+   * network and it would have worked perfectly.
+   *
+   * The address block is left out of this on purpose. What is printed there is
+   * the MACHINE talking - its addresses, and Windows' own name for each
+   * adapter, which on one real desk is literally "WiFi 2". Renaming somebody's
+   * network card is not ours to do, and a check that reads it as our prose
+   * fails on their computer and passes on ours, which is the least useful kind
+   * of test there is.
+   */
+  const saysNetwork = await js(`
+    const a = window.app;
+    a.panels.close();
+    a.panels.sharing();
+    await new Promise((r) => setTimeout(r, 350));
+    // Our words only: the addresses and adapter names are the machine's.
+    const body = document.getElementById('panelBody').cloneNode(true);
+    for (const el of body.querySelectorAll('.addr-box')) el.remove();
+    const text = body.textContent;
+    a.panels.close();
+    // Say WHICH sentence, not merely that there is one. The firewall part of
+    // this panel is written fresh on each operating system, so a machine can
+    // show wording that never renders on the machine the test was written on -
+    // and "still says wifi" sends somebody hunting through six files.
+    const m = /[^.]*wi-?fi[^.]*\./i.exec(text);
+    return { wifi: /wi-?fi/i.test(text), network: /same network/i.test(text),
+             where: m ? m[0].trim().slice(0, 140) : '' };
+  `);
+  check('the sharing panel says network rather than wifi, because a cable is neither',
+    saysNetwork.wifi === false && saysNetwork.network === true,
+    saysNetwork.wifi ? 'found: "' + saysNetwork.where + '"' : 'says network');
+
+  /*
+   * The firewall check reads rules; it cannot prove another computer can get
+   * in, because a connection to your own machine never crosses the firewall.
+   * So it can say "allowed" about a machine nothing can reach, and when it
+   * does there has to be something to click.
+   */
+  check('the commands are reachable even when the firewall says all is well',
+    sharingPanel.buttons.some((b) => /show the firewall commands/i.test(b)),
+    sharingPanel.buttons.join(' | '));
+
+  /* ---- putting the settings back ---- */
+  const resetting = await js(`
+    const a = window.app;
+    const was = { pressure: a.settings.pressure, sync: a.settings.sync,
+      updateCheck: a.settings.updateCheck };
+    a.settings.pressure = !a.settings.pressure;
+    a.settings.penSize = 99;
+    a.settings.sync = true;                 // must survive: a class may be live
+    a.settings.updateCheck = true;          // must survive: it is a network choice
+    a.resetSettings();
+    const after = { pressure: a.settings.pressure, penSize: a.settings.penSize,
+      sync: a.settings.sync, updateCheck: a.settings.updateCheck };
+    a.settings.pressure = was.pressure; a.settings.sync = was.sync;
+    a.settings.updateCheck = was.updateCheck; a.saveSettings();
+    return after;
+  `);
+  check('resetting puts a changed setting back to how it shipped',
+    resetting.pressure === true && resetting.penSize !== 99,
+    'pressure ' + resetting.pressure + ', penSize ' + resetting.penSize);
+  check('but never switches sharing off under a class that is using it',
+    resetting.sync === true);
+  check('and never answers the update question on your behalf',
+    resetting.updateCheck === true);
+
+  /*
+   * Typing in an address a computer gave itself.
+   *
+   * 169.254.x.x is what an adapter invents after asking the network for an
+   * address and hearing nothing. Two laptops on one cable have nothing else,
+   * so it is dialled like any other - but it works down that cable and nowhere
+   * else, and it stops working the moment either machine gets a real address.
+   * Somebody typing one in is told that, before they press the button.
+   */
+  const warnsOnSelfAssigned = await js(`
+    window.app.panels.close();
+    window.app.panels.sharing();
+    await new Promise((r) => setTimeout(r, 350));
+    const body = document.getElementById('panelBody');
+    const sec = [...body.querySelectorAll('.section')].find((s) => {
+      const t = s.querySelector('h5');
+      return t && t.textContent === 'Share on this network';
+    });
+    const btn = sec && [...sec.querySelectorAll('button')]
+      .find((b) => /Add a computer by address/.test(b.textContent));
+    if (!btn) return { found: false };
+    btn.click();
+    await new Promise((r) => setTimeout(r, 300));
+    const card = document.getElementById('overlayCard');
+    const text = card ? card.textContent : '';
+    // Put it back exactly as it was: Cancel, not a stray dialog left open.
+    const cancel = card && [...card.querySelectorAll('button')]
+      .find((b) => b.textContent === 'Cancel');
+    if (cancel) cancel.click();
+    await new Promise((r) => setTimeout(r, 200));
+    return { found: true, warns: /169\.254/.test(text) && /direct cable/i.test(text),
+             closed: !document.getElementById('overlay').classList.contains('show'),
+             text: text.slice(0, 40) };
+  `);
+  check('the add-by-address box warns about a 169.254 address before you type one',
+    warnsOnSelfAssigned.found && warnsOnSelfAssigned.warns, warnsOnSelfAssigned.text);
+  check('and the box closes again on Cancel, leaving nothing on screen',
+    warnsOnSelfAssigned.closed);
+
+  const backOff = await js(`
+    window.app.panels.close && window.app.panels.close();
+    await window.board.sync.stop();
+    window.app.settings.sync = false; window.app.saveSettings();
+    const st = await window.board.sync.state();
+    return { running: st.running, setting: window.app.settings.sync };
+  `);
+  check('and it is switched off again afterwards, exactly as it was found',
+    backOff.running === false && backOff.setting === false);
+
+  /*
+   * A computer that is paired but not showing up must not be offered a Send
+   * button, whatever address we remember for it.
+   *
+   * Remembering the address is right - announcements do not have to travel both
+   * ways, and a machine can be perfectly reachable while never appearing in
+   * anybody's list. Offering to send to it on the strength of that was not: with
+   * GazBoard closed at the other end, a blue "Send this board" under a heading
+   * saying the machine is not showing up is a button to nowhere. The address
+   * earns its keep by being knocked on instead, so a machine that really is
+   * there climbs into the live list and gets an ordinary Send button.
+   */
+  const away = await js(`
+    const { awayRow } = await import('app://board/js/ui/panels.js');
+    const withAddress = awayRow({ deviceId: 'd1', name: 'DESKTOP-27V8MQP',
+      remember: true, lastAddress: '192.168.0.243', lastPort: 53318 });
+    const without = awayRow({ deviceId: 'd2', name: 'Old laptop', remember: true });
+    return {
+      offlineWithAddress: withAddress.offline === true,
+      keepsTheAddress: withAddress.address === '192.168.0.243' && withAddress.lastKnown === true,
+      offlineWithout: without.offline === true,
+      noAddress: without.address === null && without.lastKnown === false,
+      stillPaired: withAddress.paired === true && without.paired === true
+    };
+  `);
+  check('a paired computer that is not showing up gets no Send button',
+    away.offlineWithAddress && away.offlineWithout);
+  check('but it keeps the address it was last reached at, to be knocked on',
+    away.keepsTheAddress && away.noAddress);
+  check('and it is still listed as paired either way', away.stillPaired);
+
   /* ---- the name plate ---- */
   const document_title = await js(`return document.title;`);
   await js(`await window.app.showAbout();`);
@@ -5753,6 +10479,1676 @@ module.exports.run = async (win, app) => {
   check('the window still answers to the new name', document_title.includes('GazBoard'), document_title);
   await shot(win, '21-about');
   await js(`document.getElementById('overlay').classList.remove('show');`);
+
+  /* ---- the board never throttles itself because it looks covered up ---- */
+  //
+  // Windows tells Chromium when a window is hidden behind another so it can
+  // stop drawing it and save the battery, and it gets that wrong whenever a
+  // screen recorder puts a see-through sharing bar on top. The board is in
+  // front of the person teaching, the app decides nobody is looking, and the
+  // ink starts lagging the pen. These three settings turn the guess off; the
+  // switches only take effect if they were set before the app came up, which
+  // is why they are checked here on the live app rather than read from source.
+  const throttling = win.webContents.backgroundThrottling;
+  check('drawing is not slowed down when the window looks covered up',
+    throttling === false, `backgroundThrottling=${throttling}`);
+  check('and the window is not backgrounded for looking covered up',
+    app.commandLine.hasSwitch('disable-backgrounding-occluded-windows'));
+  check('and the guess that decides it is covered up is off',
+    String(app.commandLine.getSwitchValue('disable-features') || '')
+      .includes('CalculateNativeWinOcclusion'),
+    app.commandLine.getSwitchValue('disable-features'));
+
+  /*
+   * The readouts on a phone, with and without the keyboard up.
+   *
+   * This one needs a real coarse pointer, so it drives Chromium's own device
+   * emulation rather than just making the window small - none of the touch CSS
+   * applies otherwise, and the bug it guards against was invisible on a desktop
+   * for exactly that reason.
+   *
+   * What went wrong: the short-screen rule sends the zoom and page readouts to
+   * the TOP of the board, setting `top` and clearing `bottom`. A later
+   * touch-only block set `bottom` again and said nothing about `top`. An
+   * absolutely positioned box given both edges does not move - it stretches. On
+   * a phone with the keyboard open the zoom readout became a 276-pixel white
+   * column down the side of the screen.
+   */
+  const onPhone = [];
+  let typingOnPhone = null;
+  let phoneBar = null;
+  let phonePageSize = null;
+  try {
+    win.webContents.debugger.attach('1.3');
+    const cdp = (m, p) => win.webContents.debugger.sendCommand(m, p || {});
+    for (const [w, h, label] of [[412, 915, 'phone'], [412, 430, 'phone with keyboard']]) {
+      await cdp('Emulation.setDeviceMetricsOverride',
+        { width: w, height: h, deviceScaleFactor: 2.625, mobile: true });
+      await cdp('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+      await sleep(450);
+      onPhone.push(await js(`
+        const out = { label: '${label}', coarse: matchMedia('(pointer: coarse)').matches };
+        for (const id of ['zoombar', 'pagebar']) {
+          const el = document.getElementById(id);
+          const r = el.getBoundingClientRect();
+          out[id] = { h: Math.round(r.height), top: Math.round(r.top) };
+        }
+        return out;
+      `));
+    }
+    /*
+     * Still in phone mode: the toolbar itself.
+     *
+     * The desktop tray is seventeen buttons and becomes a side-scroller on a
+     * handset, which puts the pen you want behind a swipe. The compact bar has
+     * one job and this measures it: everything fits, and what fits is the
+     * writing kit rather than the pointing tools.
+     *
+     * initToolbar() reads the screen once at start-up, so it is rebuilt here
+     * now that Chromium is reporting a phone - and rebuilt again below, once
+     * the emulation is off, or every later check inherits a phone toolbar.
+     */
+    await cdp('Emulation.setDeviceMetricsOverride',
+      { width: 412, height: 915, deviceScaleFactor: 2.625, mobile: true });
+    await sleep(300);
+    phoneBar = await js(`
+      const a = window.app;
+      const tb = await import('app://board/js/ui/toolbar.js');
+      tb.initToolbar(a);
+      a.syncUI();
+      await new Promise((r) => requestAnimationFrame(r));
+      const bar = document.getElementById('toolbar');
+      const kids = [...bar.children].filter((el) => el.tagName === 'BUTTON');
+      const pens = [...bar.querySelectorAll('.pen[data-pen]')].map((b) => b.dataset.pen);
+      const order = kids.map((b) => b.dataset.pen || b.dataset.cmd || b.dataset.tool || b.dataset.pop || '?');
+      const keys = [...bar.querySelectorAll('.kbd')]
+        .filter((k) => getComputedStyle(k).display !== 'none').length;
+      return {
+        compact: bar.classList.contains('phone'),
+        buttons: kids.length,
+        // the whole point: no horizontal scrolling, nothing off the edge
+        fits: bar.scrollWidth <= bar.clientWidth + 1,
+        widthUsed: Math.round(bar.getBoundingClientRect().width),
+        screen: window.innerWidth,
+        pens,
+        order,
+        visibleKeys: keys,
+        // the writing kit comes first, the pointing tools are not on the bar
+        pensFirst: order.slice(0, 3).join(',') === 'black,red,blue',
+        eraserWithPens: order.indexOf('eraser') === 4,
+        noPointingTools: !order.some((o) => ['select', 'lasso', 'pan', 'laser'].includes(o)),
+        hasAddMenu: order.includes('add'),
+        hasMoreMenu: order.includes('more'),
+        // A phone has no Ctrl+V, so Paste has to be somewhere a thumb can find
+        // it. The + menu is that somewhere; holding a finger on bare board is
+        // the other way in.
+        addMenuItems: (() => {
+          a.hideMenus();
+          const add = document.querySelector('#toolbar [data-pop="add"]');
+          add?.click();
+          const labels = [...document.querySelectorAll('.pop .menu > *')]
+            .map((n) => (n.textContent || '').trim()).filter(Boolean);
+          a.hideMenus();
+          return labels;
+        })()
+      };
+    `);
+
+    /*
+     * The same two fixes have to be reachable on a phone - which is what the
+     * Android build is. Nothing here is Android-only code: the app inside the
+     * wrapper is this one, so what matters is that the phone layout still leads
+     * to the panel, and that the note's button is big enough for a thumb rather
+     * than a mouse pointer.
+     */
+    phonePageSize = await js(`
+      const a = window.app;
+      const r = {};
+      a.hideMenus();
+      const more = document.querySelector('#toolbar [data-pop="more"]');
+      more?.click();
+      await new Promise((res) => setTimeout(res, 120));
+      const items = [...document.querySelectorAll('.pop .menu > *')].map((n) => (n.textContent || '').trim());
+      r.moreMenu = items.filter(Boolean).join(' | ');
+      const bg = [...document.querySelectorAll('.pop .menu > *')]
+        .find((n) => /^Canvas/.test((n.textContent || '').trim()));
+      r.foundBackgroundOnPhone = !!bg;
+      if (bg) bg.click();
+      await new Promise((res) => setTimeout(res, 160));
+      r.panelOpenedOnPhone = document.getElementById('panel').classList.contains('open');
+
+      const sizeRow = document.getElementById('panelBody').querySelector('.bg-sizes');
+      const btns = sizeRow ? [...sizeRow.querySelectorAll('.btn')] : [];
+      r.litBefore = btns.filter((b) => b.classList.contains('primary')).map((b) => b.textContent.trim()).join(',');
+
+      // something well off any sheet, so the offer has a reason to appear
+      const had = new Set(a.store.objects.map((o) => o.id));
+      a.store.add({ id: 'phonestray', type: 'shape', kind: 'rect', x: 3000, y: 60, w: 140, h: 100,
+                    rotation: 0, stroke: '#201f1e', fill: 'none', lineWidth: 3 }, 'x');
+
+      const a4 = btns.find((b) => b.textContent.trim() === 'A4');
+      r.foundA4OnPhone = !!a4;
+      if (a4) a4.click();
+      await new Promise((res) => setTimeout(res, 220));
+
+      const rowNow = document.getElementById('panelBody').querySelector('.bg-sizes');
+      r.litAfter = rowNow
+        ? [...rowNow.querySelectorAll('.btn')].filter((b) => b.classList.contains('primary')).map((b) => b.textContent.trim()).join(',')
+        : '(no row)';
+
+      const toast = [...document.querySelectorAll('#toasts .toast')].pop();
+      const act = toast ? toast.querySelector('.toast-action') : null;
+      r.toastHasButtonOnPhone = !!act;
+      r.buttonHeight = act ? Math.round(act.getBoundingClientRect().height) : 0;
+      r.buttonWidth = act ? Math.round(act.getBoundingClientRect().width) : 0;
+      r.buttonOnScreen = !!act && act.getBoundingClientRect().right <= window.innerWidth + 1
+                         && act.getBoundingClientRect().left >= -1;
+      const bb = act ? act.getBoundingClientRect() : null;
+      const at = bb ? document.elementFromPoint(Math.round(bb.left + bb.width / 2), Math.round(bb.top + bb.height / 2)) : null;
+      r.buttonReachableOnPhone = !!act && !!at && (at === act || act.contains(at));
+      r.whatIsAtTheButtonOnPhone = at ? (at === act ? 'the button' : (at.className || at.tagName)) : '(nothing)';
+
+      if (act) act.click();
+      await new Promise((res) => setTimeout(res, 200));
+      r.strayLeft = a.offPageObjects().length;
+
+      await a.setPageSize('infinite');
+      a.store.remove(a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id));
+      a.panels.close?.();
+      a.hideMenus();
+      return r;
+    `);
+
+    // The toolbar has to stand down while the keyboard is up, or it sits on
+    // the very box being typed into.
+    typingOnPhone = await js(`
+      const a = window.app;
+      const bar = document.getElementById('toolbar');
+      const before = getComputedStyle(bar).display;
+      const had = new Set(a.store.objects.map((o) => o.id));
+      a.addNoteAt({ x: 12000, y: 12000 });
+      await new Promise((r) => setTimeout(r, 120));
+      const during = getComputedStyle(bar).display;
+      const flagged = document.body.classList.contains('typing');
+      a.textEditor.cancel();
+      await new Promise((r) => setTimeout(r, 120));
+      const after = getComputedStyle(bar).display;
+      a.store.remove(a.store.objects.filter((o) => !had.has(o.id)).map((o) => o.id));
+      a.setTool('select'); a.setSelection([]);
+      return { before, during, after, flagged,
+               cleared: !document.body.classList.contains('typing') };
+    `);
+    await cdp('Emulation.clearDeviceMetricsOverride');
+    await cdp('Emulation.setTouchEmulationEnabled', { enabled: false });
+    win.webContents.debugger.detach();
+    await sleep(300);
+    // Back to a desktop screen, so put the desktop tray back. Leaving a phone
+    // toolbar behind would quietly change what every later check is looking at.
+    await js(`
+      const tb = await import('app://board/js/ui/toolbar.js');
+      tb.initToolbar(window.app); window.app.syncUI();
+    `);
+  } catch (e) {
+    onPhone.push({ label: 'emulation unavailable: ' + e.message });
+  }
+  const coarseEverywhere = onPhone.every((p) => p.coarse === true);
+  const shortEverywhere = onPhone.every((p) => p.zoombar && p.zoombar.h < 70 && p.pagebar.h < 70);
+  // With the keyboard up there is no room at the bottom, so the readout is
+  // meant to move to the TOP of the board. Measured from the box itself:
+  // getComputedStyle reports a resolved pixel value for `top` even when the
+  // stylesheet said `auto`, so it cannot answer this question.
+  const withKeyboard = onPhone.find((p) => p.label === 'phone with keyboard');
+  const movedToTheTop = !!withKeyboard && withKeyboard.zoombar.top < 120;
+  if (phoneBar) {
+    check('the phone gets a compact toolbar, not the desktop tray squeezed',
+      phoneBar.compact && phoneBar.buttons <= 10,
+      `${phoneBar.buttons} buttons: ${phoneBar.order.join(' ')}`);
+    check('and all of it fits the screen with nothing to scroll to',
+      phoneBar.fits, `${phoneBar.widthUsed}px used of ${phoneBar.screen}px`);
+    check('the pens come first, with the eraser beside them',
+      phoneBar.pensFirst && phoneBar.eraserWithPens, phoneBar.order.join(' '));
+    check('select, lasso, hand and laser are off the bar, not in the way',
+      phoneBar.noPointingTools, phoneBar.order.join(' '));
+    check('the + menu offers Paste, since a phone has no Ctrl+V',
+      phoneBar.addMenuItems.some((l) => l.startsWith('Paste')),
+      `+ menu holds: ${phoneBar.addMenuItems.join(' | ') || '(nothing)'}`);
+    check('and the rest is behind two menus rather than gone',
+      phoneBar.hasAddMenu && phoneBar.hasMoreMenu, phoneBar.order.join(' '));
+    check('no shortcut letters on a screen with no keyboard',
+      phoneBar.visibleKeys === 0, `${phoneBar.visibleKeys} letters showing`);
+  }
+  check('a phone really is treated as a touch device', coarseEverywhere,
+    onPhone.map((p) => p.label + ':' + p.coarse).join(' '));
+  check('the zoom and page readouts stay their own size, keyboard open or not',
+    shortEverywhere,
+    onPhone.map((p) => `${p.label} zoom ${p.zoombar && p.zoombar.h} page ${p.pagebar && p.pagebar.h}`).join(' | '));
+  check('and the zoom readout moves to the top when the keyboard takes the bottom',
+    movedToTheTop, `top ${withKeyboard && withKeyboard.zoombar.top}`);
+  check('the toolbar stands down while you are typing on a phone',
+    !!typingOnPhone && typingOnPhone.flagged && typingOnPhone.during === 'none',
+    typingOnPhone ? `${typingOnPhone.before} -> ${typingOnPhone.during}` : 'not measured');
+  if (phonePageSize) {
+    check('a phone can reach the canvas size at all, which is what Android is',
+      phonePageSize.foundBackgroundOnPhone === true && phonePageSize.panelOpenedOnPhone === true &&
+      phonePageSize.foundA4OnPhone === true,
+      `the more menu holds: ${phonePageSize.moreMenu}; panel opened: ${phonePageSize.panelOpenedOnPhone}, ` +
+      `A4 button found: ${phonePageSize.foundA4OnPhone}`);
+    check('and the phone panel updates the moment the size changes, same as desktop',
+      phonePageSize.litBefore === 'Infinite' && phonePageSize.litAfter === 'A4',
+      `lit before "${phonePageSize.litBefore}", after "${phonePageSize.litAfter}" (wanted Infinite then A4)`);
+    check('the off-the-paper note carries a button a thumb can actually hit',
+      phonePageSize.toastHasButtonOnPhone === true && phonePageSize.buttonHeight >= 32 &&
+      phonePageSize.buttonOnScreen === true && phonePageSize.buttonReachableOnPhone === true,
+      `button ${phonePageSize.buttonWidth}x${phonePageSize.buttonHeight}px (wanted at least 32 tall), ` +
+      `fully on a phone-width screen: ${phonePageSize.buttonOnScreen}, and what a thumb actually lands on: ` +
+      `${phonePageSize.whatIsAtTheButtonOnPhone}`);
+    check('and pressing it on a phone brings the work onto the page too',
+      phonePageSize.strayLeft === 0, `${phonePageSize.strayLeft} item(s) still off the paper, wanted 0`);
+  }
+
+  check('and comes straight back when you stop',
+    !!typingOnPhone && typingOnPhone.cleared && typingOnPhone.after === typingOnPhone.before,
+    typingOnPhone ? `back to ${typingOnPhone.after}` : 'not measured');
+
+  /* ---- board text is written in fonts the app ships, the same on every device ---- */
+  {
+    /*
+     * The files themselves, checked from outside the page: every face the CSS
+     * names must be on disk, carry its licence beside it, and be in the web
+     * app's offline cache - a font missing from that list works on the day
+     * it ships and silently falls back the first time someone is offline.
+     */
+    const fsSync = require('node:fs');
+    const SRC = path.join(__dirname, '..', 'src');
+    const css = fsSync.readFileSync(path.join(SRC, 'css', 'app.css'), 'utf8');
+    const sw = fsSync.readFileSync(path.join(SRC, 'sw.js'), 'utf8');
+    const declared = [...css.matchAll(/url\('\.\.\/(assets\/fonts\/board\/[^']+\.woff2)'\)/g)].map((m) => m[1]);
+    const missing = declared.filter((rel) => {
+      try { return fsSync.statSync(path.join(SRC, rel)).size < 1024; } catch { return true; }
+    });
+    check('every bundled board font the stylesheet names is really there',
+      declared.length === 22 && missing.length === 0,
+      `${declared.length} declared (wanted 22: five faces in two weights, latin and accented latin, ` +
+      `plus Bangla and Arabic in two weights), ` +
+      `missing or empty: ${missing.join(', ') || 'none'}`);
+    const families = [...new Set(declared.map((rel) => (rel.match(/board\/(.+)-(?:latin(?:-ext)?|bengali|arabic)-\d/) || [, rel])[1]))];
+    const unlicensed = families.filter((f) => {
+      try { return !/SIL Open Font License/.test(fsSync.readFileSync(path.join(SRC, 'assets', 'fonts', 'board', `LICENSE-${f}.txt`), 'utf8')); }
+      catch { return true; }
+    });
+    check('and each one ships with its licence',
+      families.length === 7 && unlicensed.length === 0,
+      `${families.length} families (${families.join(', ')}); without an OFL licence beside them: ` +
+      `${unlicensed.join(', ') || 'none'} — the licence has to travel with the font`);
+    const notCached = declared.filter((rel) => !sw.includes(`'./${rel}'`));
+    check('and each one is in the web app’s offline cache',
+      notCached.length === 0,
+      `not precached: ${notCached.join(', ') || 'none'} — works online, falls back to the device font offline`);
+  }
+
+  const boardFonts = await js(`
+    const a = window.app;
+    const r = {};
+    await a.loadBoardFonts();
+    const { FONTS } = await import('app://board/js/ui/palettes.js');
+    const { wrapText, fitFontSize } = await import('app://board/js/core/util.js');
+    const c = document.createElement('canvas').getContext('2d');
+
+    r.faces = FONTS.map((f) => f.id + ':' + (f.family || 'none')).join(' ');
+    r.labels = FONTS.map((f) => f.label).join(', ');
+    r.labelOf = Object.fromEntries(FONTS.map((f) => [f.id, f.label]));
+    /*
+     * Every file is asked for here and then its own status read, rather than
+     * trusting whatever state the page is in by now. Chromium rebuilds its
+     * list of @font-face entries whenever the window changes size - fresh
+     * entries, marked unloaded - while it goes on drawing from the copy it
+     * already has in memory (the resize check below proves the drawing never
+     * slips). So a status read late in a suite that has resized the window
+     * a dozen times says nothing about the files; asking for them does.
+     * Per-file rather than document.fonts.check(), so a failure names the
+     * file that would not load.
+     */
+    await Promise.allSettled(FONTS.flatMap((f) => [400, 600].map((w) =>
+      document.fonts.load(w + ' 16px "' + f.family + '"', 'Aa \\u0141\\u0142'))));
+    const all = [...document.fonts];
+    r.status = FONTS.map((f) => {
+      const mine = all.filter((ff) => ff.family.replace(/["']/g, '') === f.family);
+      const loaded = mine.filter((ff) => ff.status === 'loaded').length;
+      return { id: f.id, loaded, total: mine.length,
+               waiting: mine.filter((ff) => ff.status !== 'loaded').map((ff) => ff.weight + ' ' + ff.status + ' ' + ff.unicodeRange.slice(0, 12)) };
+    });
+    r.notLoaded = r.status.filter((x) => x.total === 0 || x.loaded !== x.total)
+      .map((x) => x.id + ' ' + x.loaded + '/' + x.total + (x.waiting.length ? ' [' + x.waiting.join('; ') + ']' : ''));
+
+    /*
+     * Proof the canvas draws with the bundled face and not a stand-in: the
+     * same words measured with the face in front of two very different
+     * fallbacks. If the face is doing the drawing the fallback never gets a
+     * say and the widths match to the pixel; if it is not, one side comes out
+     * monospace and the other serif. Comparing against the OLD stack instead
+     * is a coin toss - on some machines an old fallback happens to measure
+     * within a hair of the new face.
+     */
+    const S = 'The quick brown fox jumps over 12 lazy dogs';
+    const w = (font) => { c.font = font; return +c.measureText(S).width.toFixed(2); };
+    r.drawnWith = FONTS.map((f) => {
+      const a1 = w('400 20px "' + f.family + '", monospace');
+      const a2 = w('400 20px "' + f.family + '", serif');
+      const viaStack = w('400 20px ' + f.stack);
+      return { id: f.id, a1, a2, viaStack };
+    });
+    r.stray = r.drawnWith.filter((d) => d.a1 !== d.a2 || d.a1 !== d.viaStack)
+      .map((d) => d.id + ' (' + d.a1 + ' / ' + d.a2 + ' / stack ' + d.viaStack + ')');
+
+    /*
+     * Issue #24, as reported: a line that fits a table cell on one device
+     * must fit it on every device. This is the table cell's own layout - the
+     * same fit and wrap a cell does - in a default 3x3 table. The answers are
+     * pinned, and CI runs this suite on Windows, macOS and Linux: before the
+     * fonts were bundled, those three would each have given their own.
+     */
+    const cellW = 640 / 3 - 12, cellH = 360 / 3 - 12;
+    const lay = (text) => {
+      const size = fitFontSize(c, text, cellW, cellH, FONTS[0].stack, '400', 26, 10);
+      c.font = '400 ' + size + 'px ' + FONTS[0].stack;
+      const lines = wrapText(c, text, cellW);
+      return { size, lines, widths: lines.map((l) => +c.measureText(l).width.toFixed(1)) };
+    };
+    r.oneLine = lay('Marks obtained');
+    r.twoLines = lay('Week 3 quiz average');
+
+    /* and the board is redrawn once the faces land, not left in the stand-in */
+    const sf = a.surface, real = sf.repaintAll.bind(sf);
+    let repaints = 0;
+    sf.repaintAll = (...args) => { repaints++; return real(...args); };
+    a._boardFonts = null;
+    await a.loadBoardFonts();
+    sf.repaintAll = real;
+    r.repaintsWhenFontsLand = repaints;
+    return r;
+  `);
+  check('the picker calls Kalam Handwriting and Comic Neue Marker, without renaming what boards store',
+    boardFonts.labelOf.marker === 'Handwriting' && boardFonts.labelOf.hand === 'Marker' &&
+    /^Sans, Handwriting, Marker/.test(boardFonts.labels),
+    `picker reads: ${boardFonts.labels}; ids → labels ${JSON.stringify(boardFonts.labelOf)} — the ids are what a ` +
+    `board file stores, so swapping those instead would change the lettering of every note already written`);
+  check('every file of all five board faces is loaded, accented letters included',
+    boardFonts.notLoaded.length === 0,
+    `${boardFonts.status.map((x) => x.id + ' ' + x.loaded + '/' + x.total).join(', ')}; ` +
+    `not fully loaded: ${boardFonts.notLoaded.join(', ') || 'none'}`);
+  check('the canvas draws board text with those faces, not a stand-in',
+    boardFonts.stray.length === 0,
+    `stray: ${boardFonts.stray.join('; ') || 'none'} — a mismatch means the words were measured in a fallback, ` +
+    `which is exactly the device-to-device difference these fonts exist to remove`);
+  /*
+   * The widths are pinned as well as the line breaks. A break alone can come
+   * out right by luck - on a Linux build machine the stand-in font happens to
+   * break both of these sentences in the same places - so on its own it would
+   * pass there whether the fonts shipped or not. The widths belong to Open
+   * Sans and to nothing else; within a pixel, because the rasteriser may round
+   * differently per OS while the font's own measurements do not change.
+   */
+  const near = (got, want) => got.length === want.length && got.every((g, i) => Math.abs(g - want[i]) <= 1);
+  check('a line that fits one table cell fits it on every device (#24)',
+    boardFonts.oneLine.size === 26 && boardFonts.oneLine.lines.length === 1 &&
+    boardFonts.oneLine.lines[0] === 'Marks obtained' && near(boardFonts.oneLine.widths, [189.5]),
+    `laid out at ${boardFonts.oneLine.size}px as ${JSON.stringify(boardFonts.oneLine.lines)}, ` +
+    `${JSON.stringify(boardFonts.oneLine.widths)}px wide — wanted 26px on one line, 189.5px wide (Open Sans)`);
+  check('and a longer one breaks in the same place everywhere',
+    boardFonts.twoLines.size === 26 &&
+    JSON.stringify(boardFonts.twoLines.lines) === JSON.stringify(['Week 3 quiz', 'average']) &&
+    near(boardFonts.twoLines.widths, [145.8, 95.8]),
+    `laid out at ${boardFonts.twoLines.size}px as ${JSON.stringify(boardFonts.twoLines.lines)}, ` +
+    `${JSON.stringify(boardFonts.twoLines.widths)}px wide — wanted ["Week 3 quiz","average"] at [145.8, 95.8]px`);
+
+  /*
+   * Resizing the window must not drop board text into a stand-in font, even
+   * for a moment. Chromium throws its @font-face entries away and starts new
+   * ones on every resize - and a resize is exactly when the board redraws.
+   * Measured inside the resize event itself, the earliest a redraw could run.
+   */
+  await js(`
+    window.__resizeFace = null;
+    const c = document.createElement('canvas').getContext('2d');
+    const S = 'The quick brown fox jumps over 12 lazy dogs';
+    window.addEventListener('resize', () => {
+      c.font = '400 20px "GazBoard Open Sans", monospace'; const a = c.measureText(S).width;
+      c.font = '400 20px "GazBoard Open Sans", serif';     const b = c.measureText(S).width;
+      const st = [...document.fonts].filter((f) => f.family.replace(/["']/g, '') === 'GazBoard Open Sans').map((f) => f.status);
+      window.__resizeFace = { a: +a.toFixed(2), b: +b.toFixed(2), statuses: st.join(',') };
+    }, { once: true });
+    return true;
+  `);
+  const [fw, fh] = win.getSize();
+  win.setSize(fw - 80, fh);
+  for (let i = 0; i < 40 && !(await js('return !!window.__resizeFace;')); i++) await sleep(50);
+  const resizeFace = await js('return window.__resizeFace;');
+  win.setSize(fw, fh);
+  await sleep(400);
+  check('resizing the window never drops board text into a stand-in font',
+    !!resizeFace && resizeFace.a === resizeFace.b,
+    resizeFace
+      ? `measured in the resize event: ${resizeFace.a} against a monospace fallback, ${resizeFace.b} against a serif one ` +
+        `(font entries at that moment: ${resizeFace.statuses}) — equal means the bundled face drew both`
+      : 'the resize event never fired, so nothing was measured');
+  check('the board repaints once when its fonts arrive',
+    boardFonts.repaintsWhenFontsLand === 1,
+    `${boardFonts.repaintsWhenFontsLand} repaint(s) — none leaves text measured in the stand-in until something ` +
+    `else happens to redraw; more than one is wasted work at start-up`);
+
+  /* ---- an empty board says Happy Inking, and gets out of the way the moment you start ---- */
+  const greet = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface, s = a.settings;
+    const r = {};
+    const themeWas = s.theme, inkWas = s.inkWithMouse;
+    a.newBoard(true); a.textEditor.cancel();
+    sf.cam.x = 0; sf.cam.y = 0; sf.cam.z = 1;
+    a.setTool('pen'); s.inkWithMouse = 'yes';
+    const frame = () => { sf.invalidate(); sf.draw(); return sf._greetingDrawn; };
+
+    r.empty = frame();
+    r.w = sf.width; r.h = sf.height;
+    r.objectsWhileGreeting = a.store.objects.length;
+
+    // pen down: gone before the stroke is finished, not after
+    const rect = sf.canvas.getBoundingClientRect();
+    const ev = (x, y) => ({ pointerId: 1, pointerType: 'mouse', button: 0, buttons: 1,
+      clientX: rect.left + x, clientY: rect.top + y, shiftKey: false, altKey: false, pressure: 0.5 });
+    it.onDown(ev(200, 200)); it.onMove(ev(260, 240)); it.onMove(ev(320, 260));
+    r.wetWhileInking = !!sf.wet;
+    sf.draw();
+    r.whileInking = sf._greetingDrawn;
+    it.onUp(ev(320, 260)); it.action = null; it.pointers.clear();
+    r.objectsAfterStroke = a.store.objects.length;
+    r.afterStroke = frame();
+
+    // back to an empty board, and it is back
+    a.command('edit.undo');
+    r.objectsAfterUndo = a.store.objects.length;
+    r.afterUndo = !!frame();
+
+    // anything at all on the board sends it away, not only ink
+    a.store.add({ id: 'gn', type: 'note', x: 300, y: 300, w: 200, h: 200, color: '#ffd94a',
+                  text: 'hi', rotation: 0, align: 'center', font: 'hand' });
+    r.withNote = frame();
+    a.store.clear();
+    r.afterClear = !!frame();
+
+    /*
+     * The eraser repaints only the strip it touched and leaves the rest of the
+     * canvas as it was. Text this faint, painted again on top of its own last
+     * copy, darkens with every move - so the greeting has to force a full frame
+     * instead. The pixels under it are summed before and after ten strips.
+     */
+    frame();
+    const dpr = sf.dpr || 1;
+    const sum = () => {
+      const x0 = Math.round((sf.width / 2 - 200) * dpr), y0 = Math.round((sf.height / 2 - 40) * dpr);
+      const d = sf.ctx.getImageData(x0, y0, Math.round(400 * dpr), Math.round(80 * dpr)).data;
+      let t = 0; for (let i = 0; i < d.length; i += 4) t += d[i] + d[i + 1] + d[i + 2];
+      return t;
+    };
+    /*
+     * Both readings are taken the same way - after an eraser-sized repaint -
+     * so the test compares like with like. A fresh full paint and a repaint
+     * from the board's saved copy can differ by a shade here and there,
+     * depending on the display's scaling and the graphics hardware (a
+     * Windows machine at 125% measured 780 out of 36 million), and that
+     * difference is not darkening.
+     */
+    const strip = () => { sf.invalidateBand({ x: 0, y: 0, w: 20, h: 20 }); sf.draw(); };
+    strip();
+    const before = sum();
+    for (let i = 0; i < 10; i++) strip();
+    r.darkenedBy = before - sum();
+    r.inkPixels = before;
+    r.dpr = dpr;
+
+    // never in an export: the same picture with the greeting switched off
+    const v = sf.cam.viewport(sf.width, sf.height);
+    const shot = () => {
+      const c = sf.renderTo({ x: v.x, y: v.y, w: v.w, h: v.h }, 1, true);
+      return c.toDataURL('image/png');
+    };
+    const withGreeting = shot();
+    const g = sf.greeting; sf.greeting = null;
+    const without = shot();
+    sf.greeting = g;
+    r.exportUntouched = withGreeting === without;
+
+    // light ink on a dark board
+    s.theme = 'dark'; a.applyTheme();
+    r.darkColour = frame()?.color;
+    s.theme = themeWas; a.applyTheme();
+    r.lightColour = frame()?.color;
+
+    s.inkWithMouse = inkWas; a.setTool('select'); a.newBoard(true);
+    return r;
+  `);
+  check('an empty board greets you with Happy Inking, in the middle of the window',
+    !!greet.empty && greet.empty.text === 'Happy Inking !!' &&
+    greet.empty.x === greet.w / 2 && greet.empty.y === greet.h / 2 && greet.objectsWhileGreeting === 0,
+    greet.empty
+      ? `"${greet.empty.text}" at ${greet.empty.x},${greet.empty.y} in a ${greet.w}x${greet.h} window, ${greet.empty.size}px; ` +
+        `objects on the board meanwhile: ${greet.objectsWhileGreeting} (it must never be one)`
+      : 'nothing was drawn on an empty board');
+  check('in the Handwriting face',
+    !!greet.empty && /GazBoard Kalam/.test(greet.empty.font), greet.empty ? greet.empty.font : 'not drawn');
+  check('it is gone the moment the pen touches down, before the stroke is finished',
+    greet.wetWhileInking === true && greet.whileInking === null,
+    `ink in flight: ${greet.wetWhileInking}; greeting drawn under it: ${greet.whileInking ? 'yes' : 'no'}`);
+  check('and stays gone once there is ink on the board',
+    greet.objectsAfterStroke === 1 && greet.afterStroke === null,
+    `${greet.objectsAfterStroke} object(s), greeting ${greet.afterStroke ? 'still drawn' : 'gone'}`);
+  check('undo back to an empty board and it returns',
+    greet.objectsAfterUndo === 0 && greet.afterUndo === true,
+    `${greet.objectsAfterUndo} object(s), greeting back: ${greet.afterUndo}`);
+  check('a sticky note sends it away too, and clearing the board brings it back',
+    greet.withNote === null && greet.afterClear === true,
+    `with a note: ${greet.withNote ? 'still drawn' : 'gone'}; after clearing: ${greet.afterClear ? 'back' : 'missing'}`);
+  /*
+   * A share, not an exact zero, so display scaling and graphics hardware do
+   * not matter. The bug this guards against is enormous: text painted over
+   * its own last copy changed the area by 9.7% to 12.8% in ten moves. Two
+   * honest paints of the same picture differ by a shimmer - measured at
+   * 0.002% on Windows at 125% and 0.013% on a macOS build machine, in either
+   * direction. So the limit is 1%: ten times under the bug, and seventy-five
+   * times over the worst shimmer seen, rather than a hair's breadth over it.
+   * (It started at 0.01%, and the Mac cleared that by a hair and failed.)
+   */
+  const darkShare = greet.inkPixels ? Math.abs(greet.darkenedBy) / greet.inkPixels : 1;
+  check('the eraser passing over an empty board does not darken it',
+    darkShare < 0.01,
+    `changed by ${(darkShare * 100).toFixed(4)}% (${greet.darkenedBy} of ${greet.inkPixels}) across ten eraser-sized ` +
+    `repaints at ${greet.dpr}x scaling — allowed under 1%; faint text painted over its own last copy ` +
+    `changes by around 10%`);
+  check('it never reaches an export',
+    greet.exportUntouched === true,
+    `export with the greeting on matches one with it off: ${greet.exportUntouched}`);
+  check('light ink on a dark board, dark ink on a light one',
+    greet.darkColour === '#f3f2f1' && greet.lightColour === '#201f1e',
+    `dark board: ${greet.darkColour} (wanted #f3f2f1), light board: ${greet.lightColour} (wanted #201f1e)`);
+
+  /* ---- answer covers: hide an answer, lift it with a tap ---- */
+  const cover = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface, s = a.settings;
+    const { Surface } = await import('app://board/js/core/surface.js');
+    const { pick, inBox } = await import('app://board/js/core/hit.js');
+    const r = {};
+    const was = { mouse: s.inkWithMouse, finger: s.inkWithFinger, autosave: s.autosave };
+    s.autosave = false;
+    a.newBoard(true); a.textEditor.cancel();
+    sf.cam.x = sf.width / 2; sf.cam.y = sf.height / 2; sf.cam.z = 1;
+    const rect = sf.canvas.getBoundingClientRect();
+    const ev = (type, x, y, buttons, id = 61) => ({ pointerId: id, pointerType: type, button: 0, buttons,
+      pressure: 0.5, clientX: rect.left + x, clientY: rect.top + y, shiftKey: false, altKey: false,
+      ctrlKey: false, metaKey: false });
+    const reset = () => { it.action = null; it.actionId = null; it.pointers.clear(); it.cancelHold(); };
+    const tap = (type, p) => { reset(); it.onDown(ev(type, p.x, p.y, 1)); it.onUp(ev(type, p.x, p.y, 0)); reset(); };
+    const px = (p) => {
+      sf.invalidate(); sf.draw();
+      const d = sf.ctx.getImageData(Math.round(p.x * sf.dpr), Math.round(p.y * sf.dpr), 1, 1).data;
+      return '#' + [d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, '0')).join('');
+    };
+    const settle = () => { sf._fades.clear(); };
+
+    // a bit of "answer" underneath, so there is something to hide
+    a.store.add({ id: 'ans', type: 'text', x: -120, y: -30, w: 240, h: 60, text: 'x = 42', rotation: 0,
+                  color: '#201f1e', fontSize: 40, align: 'left', valign: 'top', font: 'ui', background: 'none' }, 'x');
+
+    a.command('insert.curtain');
+    const c = a.store.objects.find((o) => o.type === 'curtain');
+    r.made = !!c;
+    r.coverSelected = !!c && a.surface.selection.has(c.id) && a.surface.selection.size === 1;
+    r.startsCovered = !!c && c.revealed === false;
+    r.tool = a.tool;
+    // lie it straight over the answer
+    a.store.update(c.id, { x: -160, y: -50, w: 320, h: 100 }, 'x');
+    a.setSelection([]);
+    const mid = sf.cam.toScreen(-150, 0);          // the left end: bare cover, clear of its label
+    r.coveredPixel = px(mid);
+    r.objectsBefore = a.store.objects.length;
+
+    // --- the pen, tapping: lifts it and leaves no dot ---
+    a.setTool('pen'); s.inkWithMouse = 'yes';
+    tap('pen', mid);
+    r.penLifted = a.store.get(c.id).revealed === true;
+    r.penLeftNoInk = a.store.objects.length === r.objectsBefore;
+    r.undoLabel = a.store.undoStack[a.store.undoStack.length - 1]?.label;
+    r.fading = sf._fades.has(c.id);
+    // the fade runs its course and clears itself
+    const f = sf._fades.get(c.id);
+    if (f) sf.drawFades(sf.ctx, f.t0 + Surface.FADE_MS + 5);
+    r.fadeGone = !sf._fades.has(c.id);
+    settle();
+    r.liftedPixel = px(mid);
+    r.notPickable = pick(a.store, { x: -150, y: 0 }) === null ||
+      pick(a.store, { x: -150, y: 0 })?.id !== c.id;
+    r.notInMarquee = !inBox(a.store, { x: -400, y: -300, w: 800, h: 600 }).some((o) => o.id === c.id);
+    a.command('edit.selectAll');
+    r.notInSelectAll = !a.surface.selection.has(c.id) && a.surface.selection.has('ans');
+    a.setSelection([]);
+    a.setTool('pen');                  // select-all hands the board to Select
+    // a lifted cover is not in an export either
+    const shot = () => sf.renderTo({ x: -200, y: -80, w: 400, h: 160 }, 1, true).toDataURL('image/png');
+    const withLifted = shot();
+    const lifted = a.store.get(c.id);
+    a.store.doc.objects[c.id] = null; a.store.rev++;
+    const without = shot();
+    a.store.doc.objects[c.id] = lifted; a.store.rev++;
+    r.exportUntouched = withLifted === without;
+
+    // --- undo puts it back ---
+    a.command('undo');
+    r.undoCovers = a.store.get(c.id).revealed === false;
+    settle();
+    r.backPixel = px(mid);
+
+    // --- a real stroke across it is ink, not a reveal ---
+    reset();
+    it.onDown(ev('pen', mid.x, mid.y, 1));
+    for (let i = 1; i <= 8; i++) it.onMove(ev('pen', mid.x + i * 12, mid.y + i * 2, 1));
+    it.onUp(ev('pen', mid.x + 96, mid.y + 16, 0)); reset();
+    r.strokeKeptCover = a.store.get(c.id).revealed === false;
+    r.strokeInked = a.store.objects.length === r.objectsBefore + 1;
+    // and ink written on the cover does not get in the way of the tap that lifts it
+    tap('pen', { x: mid.x + 48, y: mid.y + 8 });
+    r.tapThroughInk = a.store.get(c.id).revealed === true;
+    a.command('undo'); settle();
+
+    // --- a finger that moves the board: a tap still lifts it, a drag does not ---
+    s.inkWithFinger = 'no';
+    const cam0 = { x: sf.cam.x, y: sf.cam.y };
+    reset();
+    it.onDown(ev('touch', mid.x, mid.y, 1));
+    for (let i = 1; i <= 6; i++) it.onMove(ev('touch', mid.x + i * 15, mid.y, 1));
+    it.onUp(ev('touch', mid.x + 90, mid.y, 0)); reset();
+    r.fingerDragKept = a.store.get(c.id).revealed === false;
+    a.store.update(c.id, { x: -160, y: -50 }, 'x');     // put it back where it was dragged from
+    sf.cam.x = cam0.x; sf.cam.y = cam0.y;
+    const cx0 = a.store.get(c.id).x;
+    tap('touch', mid);
+    r.fingerTapLifted = a.store.get(c.id).revealed === true;
+    r.fingerTapDidNotMove = a.store.get(c.id).x === cx0;
+    r.fingerOneUndo = a.store.undoStack[a.store.undoStack.length - 1]?.label === 'reveal';
+    a.command('undo'); settle();
+
+    // --- the laser: a tap lifts it, sweeping across it does not ---
+    a.setTool('laser');
+    reset();
+    it.onDown(ev('mouse', mid.x, mid.y, 1));
+    for (let i = 1; i <= 6; i++) it.onMove(ev('mouse', mid.x + i * 15, mid.y, 1));
+    it.onUp(ev('mouse', mid.x + 90, mid.y, 0)); reset();
+    r.laserSweepKept = a.store.get(c.id).revealed === false;
+    tap('mouse', mid);
+    r.laserTapLifted = a.store.get(c.id).revealed === true;
+    a.command('undo'); settle();
+    sf.laser.length = 0;
+
+    // --- Select picks it up instead, and its bar offers Reveal by name ---
+    a.setTool('select');
+    tap('mouse', mid);
+    r.selectSelects = a.surface.selection.has(c.id) && a.store.get(c.id).revealed === false;
+    a.syncUI();
+    const btn = document.querySelector('#ctxbar .reveal-btn');
+    r.barHasReveal = !!btn && /Reveal/.test(btn.textContent);
+    btn?.click();
+    r.barRevealed = a.store.get(c.id).revealed === true;
+    r.barDropsSelection = !a.surface.selection.has(c.id);
+    a.command('undo'); settle();
+
+    // --- a locked cover still lifts on a double-click ---
+    a.store.update(c.id, { locked: true }, 'x');
+    it.onDoubleClick({ clientX: rect.left + mid.x, clientY: rect.top + mid.y });
+    r.lockedDoubleClick = a.store.get(c.id).revealed === true;
+    a.command('undo'); a.store.update(c.id, { locked: false }, 'x'); settle();
+
+    // --- Cover answers again: every lifted one, as a single undo ---
+    const c2 = a.addCurtain();
+    a.revealCurtain(c.id); a.revealCurtain(c2.id); settle();
+    const depth = a.store.undoStack.length;
+    a.command('curtain.coverAll');
+    r.coverAll = !a.store.get(c.id).revealed && !a.store.get(c2.id).revealed;
+    r.coverAllOneUndo = a.store.undoStack.length === depth + 1;
+
+    // --- a board saved mid-lesson opens the way it was left ---
+    a.revealCurtain(c2.id); settle();
+    const saved = JSON.parse(JSON.stringify(a.store.toJSON()));
+    a.newBoard(true);
+    await a.loadBoard(saved);
+    r.roundTrip = a.store.get(c.id)?.revealed === false && a.store.get(c2.id)?.revealed === true;
+
+    s.inkWithMouse = was.mouse; s.inkWithFinger = was.finger; s.autosave = was.autosave;
+    if (was.finger === undefined) delete s.inkWithFinger;
+    a.setTool('select'); a.newBoard(true);
+    return r;
+  `);
+  check('an answer cover goes on from the Insert menu, selected and ready to size',
+    cover.made && cover.coverSelected && cover.startsCovered && cover.tool === 'select',
+    `made: ${cover.made}, selected on its own: ${cover.coverSelected}, covered: ${cover.startsCovered}, tool: ${cover.tool}`);
+  /* The cover's own indigo, or its faint white stripe over the same indigo -
+     either way nothing of the white board or the black answer shows. */
+  const isCover = (hex) => {
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(String(hex).slice(i, i + 2), 16));
+    return r >= 0x50 && r <= 0x78 && g >= 0x55 && g <= 0x7c && b >= 0xc0 && b <= 0xd8;
+  };
+  check('it is solid: the board does not show through',
+    isCover(cover.coveredPixel),
+    `pixel over the cover: ${cover.coveredPixel}, wanted the cover's indigo (#5b5fc7, or #696dcc on a stripe)`);
+  check('a tap with the pen lifts it, and leaves no dot behind',
+    cover.penLifted && cover.penLeftNoInk && cover.undoLabel === 'reveal',
+    `lifted: ${cover.penLifted}, no new ink: ${cover.penLeftNoInk}, undo entry: "${cover.undoLabel}"`);
+  check('it melts away over a quarter-second rather than blinking out',
+    cover.fading && cover.fadeGone,
+    `fading straight after the tap: ${cover.fading}; gone once the fade has run: ${cover.fadeGone}`);
+  check('once lifted, the answer underneath is what you see',
+    !isCover(cover.liftedPixel),
+    `pixel after: ${cover.liftedPixel}, before: ${cover.coveredPixel}`);
+  check('a lifted cover cannot be clicked, boxed or select-all’d',
+    cover.notPickable && cover.notInMarquee && cover.notInSelectAll,
+    `click: ${cover.notPickable ? 'misses it' : 'HITS it'}, marquee: ${cover.notInMarquee ? 'skips it' : 'TAKES it'}, ` +
+    `select all: ${cover.notInSelectAll ? 'skips it' : 'TAKES it'}`);
+  check('and it is not in an export', cover.exportUntouched,
+    `export with the lifted cover matches one without it: ${cover.exportUntouched}`);
+  check('undo puts the cover back over the answer',
+    cover.undoCovers && isCover(cover.backPixel),
+    `covered again: ${cover.undoCovers}, pixel: ${cover.backPixel}`);
+  check('a real stroke across a cover is ink, not a reveal',
+    cover.strokeKeptCover && cover.strokeInked,
+    `cover still on: ${cover.strokeKeptCover}, stroke kept: ${cover.strokeInked}`);
+  check('ink written on a cover does not stop a tap lifting it',
+    cover.tapThroughInk, `lifted through the ink: ${cover.tapThroughInk}`);
+  check('a finger that moves the board: a tap lifts the cover, a drag leaves it on',
+    cover.fingerDragKept && cover.fingerTapLifted && cover.fingerTapDidNotMove && cover.fingerOneUndo,
+    `drag kept it: ${cover.fingerDragKept}, tap lifted it: ${cover.fingerTapLifted}, ` +
+    `tap did not nudge it: ${cover.fingerTapDidNotMove}, one undo entry: ${cover.fingerOneUndo}`);
+  check('the laser: a tap lifts it, sweeping across it does not',
+    cover.laserTapLifted && cover.laserSweepKept,
+    `sweep kept it: ${cover.laserSweepKept}, tap lifted it: ${cover.laserTapLifted}`);
+  check('Select picks a cover up, and its bar has a Reveal button that lifts it',
+    cover.selectSelects && cover.barHasReveal && cover.barRevealed && cover.barDropsSelection,
+    `selected: ${cover.selectSelects}, Reveal on the bar: ${cover.barHasReveal}, ` +
+    `pressing it lifts it: ${cover.barRevealed}, and lets go of it: ${cover.barDropsSelection}`);
+  check('a locked cover still lifts on a double-click',
+    cover.lockedDoubleClick, `lifted: ${cover.lockedDoubleClick}`);
+  check('Cover answers again puts every lifted cover back, as one undo',
+    cover.coverAll && cover.coverAllOneUndo,
+    `all covered: ${cover.coverAll}, one undo entry: ${cover.coverAllOneUndo}`);
+  check('a board saved mid-lesson opens with the same answers showing',
+    cover.roundTrip, `round trip kept which covers were lifted: ${cover.roundTrip}`);
+
+  /* ---- a cover looks the same whatever zoom it was made at ---- */
+  const coverZoom = await js(`
+    const a = window.app, sf = a.surface;
+    const { curtainLabelSize } = await import('app://board/js/core/render.js');
+    const ctx = document.createElement('canvas').getContext('2d');
+    const r = {};
+    const made = (z) => {
+      a.newBoard(true); a.textEditor.cancel();
+      sf.cam.x = sf.width / 2; sf.cam.y = sf.height / 2; sf.cam.z = z;
+      const c = a.addCurtain();
+      const size = curtainLabelSize(ctx, c);
+      ctx.font = '600 ' + size + 'px sans-serif';
+      return { onScreen: +(size * z).toFixed(2), cardOnScreen: +(c.h * z).toFixed(1),
+               fits: ctx.measureText('Tap to reveal').width <= Math.abs(c.w) };
+    };
+    r.at100 = made(1);
+    r.at5 = made(0.05);
+    r.at2 = made(0.02);
+    r.at400 = made(4);
+    a.newBoard(true);
+    return r;
+  `);
+  check('a cover made zoomed right out has a label as readable as one made at 100%',
+    [coverZoom.at5, coverZoom.at2, coverZoom.at400].every((m) =>
+      Math.abs(m.onScreen - coverZoom.at100.onScreen) / coverZoom.at100.onScreen < 0.02 && m.fits) &&
+    coverZoom.at100.onScreen >= 20,
+    `label on screen when the cover was made at 100%: ${coverZoom.at100.onScreen}px, at 5%: ${coverZoom.at5.onScreen}px, ` +
+    `at 2%: ${coverZoom.at2.onScreen}px, at 400%: ${coverZoom.at400.onScreen}px — all should match; ` +
+    `fits across the card: ${[coverZoom.at100, coverZoom.at5, coverZoom.at2, coverZoom.at400].map((m) => m.fits).join(',')}`);
+
+  /* ---- writing ON a cover belongs to the cover; writing near it does not ---- */
+  const onCover = await js(`
+    const a = window.app, it = a.interaction, sf = a.surface, s = a.settings;
+    const { pick } = await import('app://board/js/core/hit.js');
+    const r = {};
+    const was = { mouse: s.inkWithMouse, autosave: s.autosave };
+    s.autosave = false; s.inkWithMouse = 'yes';
+    a.newBoard(true); a.textEditor.cancel();
+    sf.cam.x = sf.width / 2; sf.cam.y = sf.height / 2; sf.cam.z = 1;
+    const rect = sf.canvas.getBoundingClientRect();
+    const ev = (x, y, buttons) => ({ pointerId: 62, pointerType: 'pen', button: 0, buttons, pressure: 0.5,
+      clientX: rect.left + x, clientY: rect.top + y, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false });
+    const reset = () => { it.action = null; it.actionId = null; it.pointers.clear(); it.cancelHold(); };
+    // a stroke between two WORLD points, sampled along the way
+    const draw = (x0, y0, x1, y1) => {
+      reset();
+      const n = 12, p = (i) => sf.cam.toScreen(x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n);
+      it.onDown(ev(p(0).x, p(0).y, 1));
+      for (let i = 1; i <= n; i++) it.onMove(ev(p(i).x, p(i).y, 1));
+      it.onUp(ev(p(n).x, p(n).y, 0)); reset();
+      const id = a.store.doc.order[a.store.doc.order.length - 1];
+      return a.store.get(id);
+    };
+    const settle = () => sf._fades.clear();
+
+    const c = a.addCurtain();
+    a.store.update(c.id, { x: -200, y: -60, w: 400, h: 120 }, 'x');
+    a.setSelection([]);
+    a.setTool('pen');
+
+    const onIt = draw(-150, -20, -40, 20);           // wholly on the card
+    const inFrom = draw(-400, 0, -100, 0);           // starts off it, ends on it
+    const outFrom = draw(150, 0, 500, 40);           // starts on it, runs mostly off
+    const beside = draw(-180, 100, 180, 100);        // under the card, not touching
+    r.onItOwned = onIt?.attachedTo === c.id;
+    r.inFromOwned = inFrom?.attachedTo || null;
+    r.outFromOwned = outFrom?.attachedTo || null;
+    r.besideOwned = beside?.attachedTo || null;
+
+    const depth = a.store.undoStack.length;
+    a.revealCurtain(c.id);
+    r.oneUndo = a.store.undoStack.length === depth + 1;
+    r.onItHidden = a.store.get(onIt.id).hidden === true;
+    r.othersShown = ![inFrom, outFrom, beside].some((o) => a.store.get(o.id).hidden);
+    r.onItFades = sf._fades.has(onIt.id);
+    settle();
+    // gone from the pointer and the eraser too
+    const mid = onIt.points[Math.floor(onIt.points.length / 2)];
+    r.onItUnpickable = pick(a.store, mid)?.id !== onIt.id;
+    // and from an export
+    const shot = () => sf.renderTo({ x: -220, y: -80, w: 440, h: 160 }, 1, true).toDataURL('image/png');
+    const withHidden = shot();
+    const keep = a.store.get(onIt.id);
+    a.store.doc.objects[onIt.id] = null; a.store.rev++;
+    r.exportUntouched = withHidden === shot();
+    a.store.doc.objects[onIt.id] = keep; a.store.rev++;
+
+    a.command('undo'); settle();
+    r.undoBoth = a.store.get(c.id).revealed === false && !a.store.get(onIt.id).hidden;
+
+    // moving the card carries what is written on it
+    a.setTool('select');
+    const grab = sf.cam.toScreen(160, -45);          // a corner of the card with nothing on it
+    const x0 = a.store.get(onIt.id).points[0].x;
+    reset();
+    const mev = (x, y, b) => ({ ...ev(x, y, b), pointerType: 'mouse', pointerId: 63 });
+    it.onDown(mev(grab.x, grab.y, 1));
+    for (let i = 1; i <= 5; i++) it.onMove(mev(grab.x + i * 10, grab.y, 1));
+    it.onUp(mev(grab.x + 50, grab.y, 0)); reset();
+    r.cardMoved = Math.round(a.store.get(c.id).x - (-200));
+    r.inkRode = Math.round(a.store.get(onIt.id).points[0].x - x0);
+
+    // dragging the ink itself off the card lets go of it
+    a.setSelection([onIt.id], false, { whole: false });
+    const from = sf.cam.toScreen(a.store.get(onIt.id).points[0].x, a.store.get(onIt.id).points[0].y);
+    reset();
+    it.onDown(mev(from.x, from.y, 1));
+    for (let i = 1; i <= 10; i++) it.onMove(mev(from.x, from.y + i * 30, 1));
+    it.onUp(mev(from.x, from.y + 300, 0)); reset();
+    r.draggedOffReleased = !a.store.get(onIt.id).attachedTo;
+    a.setSelection([]);
+    a.revealCurtain(c.id); settle();
+    r.draggedOffStays = !a.store.get(onIt.id).hidden;
+
+    // Cover answers again brings a card's own writing back with it
+    a.command('curtain.coverAll');
+    a.setTool('pen');
+    const fresh = draw(-100, -10, 0, 10);
+    r.freshOwned = fresh?.attachedTo === c.id;
+    a.revealCurtain(c.id); settle();
+    a.command('curtain.coverAll');
+    r.coverAgainShows = !a.store.get(fresh.id).hidden;
+
+    // locking a card does not sweep up the ink round about it
+    const near = draw(180, -30, 320, -30);           // half on, half off, drawn after
+    a.setSelection([c.id]); a.command('edit.lock'); a.setSelection([]);
+    r.lockAdopted = a.store.get(near.id).attachedTo || null;
+
+    s.inkWithMouse = was.mouse; s.autosave = was.autosave;
+    a.setTool('select'); a.newBoard(true);
+    return r;
+  `);
+  check('ink written on a cover belongs to it',
+    onCover.onItOwned, `stroke drawn wholly on the card owned by it: ${onCover.onItOwned}`);
+  check('ink that only strays onto a cover does not',
+    onCover.inFromOwned === null && onCover.outFromOwned === null && onCover.besideOwned === null,
+    `started off and ran on: ${onCover.inFromOwned || 'free'}; started on and ran mostly off: ` +
+    `${onCover.outFromOwned || 'free'}; drawn beside it: ${onCover.besideOwned || 'free'} — anything taken ` +
+    `wrongly vanishes from the board when the card is lifted`);
+  check('lifting the cover takes its writing with it, and nothing else',
+    onCover.onItHidden && onCover.othersShown && onCover.onItFades && onCover.oneUndo,
+    `its ink hidden: ${onCover.onItHidden}, the rest still showing: ${onCover.othersShown}, ` +
+    `fades with the card: ${onCover.onItFades}, one undo step: ${onCover.oneUndo}`);
+  check('writing that went with the cover cannot be clicked or exported',
+    onCover.onItUnpickable && onCover.exportUntouched,
+    `click misses it: ${onCover.onItUnpickable}, export leaves it out: ${onCover.exportUntouched}`);
+  check('undo brings the cover and its writing back together',
+    onCover.undoBoth, `both back: ${onCover.undoBoth}`);
+  check('moving the cover carries what is written on it',
+    onCover.cardMoved === 50 && onCover.inkRode === 50,
+    `card moved ${onCover.cardMoved}, its ink moved ${onCover.inkRode} (both should be 50)`);
+  check('ink dragged off its cover no longer belongs to it',
+    onCover.draggedOffReleased && onCover.draggedOffStays,
+    `let go: ${onCover.draggedOffReleased}, still showing after the card is lifted: ${onCover.draggedOffStays}`);
+  check('Cover answers again brings a card’s own writing back too',
+    onCover.freshOwned && onCover.coverAgainShows,
+    `owned: ${onCover.freshOwned}, showing again: ${onCover.coverAgainShows}`);
+  check('locking a cover does not claim the ink around it',
+    onCover.lockAdopted === null, `ink half on the card after locking: ${onCover.lockAdopted || 'free'}`);
+
+  /* ---- presenting: the board, the whole screen, and the page keys ---- */
+  const presentSetup = await js(`
+    const a = window.app, sf = a.surface;
+    const r = {};
+    a.newBoard(true); a.textEditor.cancel();
+    await a.setPageSize('a4', 'landscape');
+    a.addPage(); a.addPage();
+    a.goToPage(0);
+    r.pages = a.pageCount;
+    // Full screen is asked for, but this window must not actually go there.
+    window.__fs = 0;
+    document.documentElement.requestFullscreen = function () { window.__fs++; return Promise.resolve(); };
+    r.hBefore = sf.height;
+    r.wBefore = sf.width;
+    a.onKeyDown(new KeyboardEvent('keydown', { key: 'F5', cancelable: true }));
+    r.presenting = a.presenting;
+    r.asked = window.__fs;
+    r.bodyClass = document.body.classList.contains('presenting');
+    const shown = (id) => { const el = document.getElementById(id); return !!el && getComputedStyle(el).display !== 'none'; };
+    r.topbar = shown('topbar'); r.pagebar = shown('pagebar'); r.zoombar = shown('zoombar');
+    r.presentbar = shown('presentbar');
+    r.toolbarInert = getComputedStyle(document.getElementById('toolbar')).pointerEvents === 'none';
+    return r;
+  `);
+  await sleep(450);
+  const present = await js(`
+    const a = window.app, sf = a.surface;
+    const r = {};
+    const tb = document.getElementById('toolbar').getBoundingClientRect();
+    r.toolbarBelow = tb.top >= window.innerHeight - 2;
+    r.toolbarTop = Math.round(tb.top); r.vh = window.innerHeight;
+    sf.resize(true);
+    r.hAfter = sf.height;
+    const key = (k) => a.onKeyDown(new KeyboardEvent('keydown', { key: k, cancelable: true }));
+    const at = () => a.currentPageIndex();
+    r.start = at();
+    // the page on show fills the window: its sheet is centred
+    const rects = (await import('app://board/js/core/pages.js')).pageRects(a.pages);
+    const centre = (i) => { const q = rects[i]; const c = sf.cam.toScreen(q.x + q.w / 2, q.y + q.h / 2); return [Math.round(c.x - sf.width / 2), Math.round(c.y - sf.height / 2)]; };
+    r.startCentred = centre(0);
+    key('PageDown'); r.pd = at();
+    r.label = document.getElementById('presentLabel').textContent;
+    key('ArrowRight'); r.ar = at();
+    r.centred3 = centre(2);
+    key('ArrowRight'); r.pastEnd = at();
+    r.nextDisabled = document.querySelector('#presentbar [data-present="next"]').disabled;
+    key('ArrowLeft'); r.al = at();
+    key('PageUp'); r.pu = at();
+    // Space pans; it never turns the page
+    key(' ');
+    r.afterSpace = at();
+    a.interaction.spaceDown = false;
+    // with something selected the arrows nudge it instead
+    const q = rects[0];
+    a.store.add({ id: 'pnote', type: 'note', x: q.x + 100, y: q.y + 100, w: 200, h: 200, color: '#ffd94a',
+                  text: '', rotation: 0, align: 'center', font: 'hand' }, 'x');
+    a.setSelection(['pnote']);
+    const x0 = a.store.get('pnote').x;
+    key('ArrowRight');
+    r.nudged = a.store.get('pnote').x > x0;
+    r.pageAfterNudge = at();
+    // Page Down still turns pages with a selection - it never nudged anything
+    key('PageDown'); r.pdWithSelection = at();
+    a.setSelection([]);
+    a.goToPage(0);
+
+    // the tools come up at the bottom edge, and go when the pointer leaves
+    const move = (y, buttons = 0) => document.dispatchEvent(new PointerEvent('pointermove',
+      { clientX: 300, clientY: y, buttons, bubbles: true }));
+    move(window.innerHeight - 10); r.edgeShows = document.body.classList.contains('show-tools');
+    move(80); r.awayHides = !document.body.classList.contains('show-tools');
+    move(window.innerHeight - 10, 1); r.inkingNoShow = !document.body.classList.contains('show-tools');
+    // pinned from the corner bar, they stay
+    document.querySelector('#presentbar [data-present="tools"]').click();
+    move(80); r.pinnedStays = document.body.classList.contains('show-tools');
+    document.querySelector('#presentbar [data-present="tools"]').click();
+    r.unpinned = !document.body.classList.contains('show-tools');
+
+    // Escape: out, and everything is back
+    key('Escape');
+    r.escOut = !a.presenting && !document.body.classList.contains('presenting');
+    const shown = (id) => getComputedStyle(document.getElementById(id)).display !== 'none';
+    r.topbarBack = shown('topbar'); r.pagebarBack = shown('pagebar');
+    r.presentbarGone = document.getElementById('presentbar').hidden;
+    sf.resize(true);
+    r.hBack = sf.height;
+
+    // leaving full screen by any route ends presenting too
+    a.startPresenting();
+    r.fsAsked = a._presentFullscreen === true;
+    document.dispatchEvent(new Event('fullscreenchange'));
+    r.fsExitStops = !a.presenting;
+
+    // an infinite board: clean full screen, and the page keys do nothing
+    a.newBoard(true); a.textEditor.cancel();
+    a.startPresenting({ fullscreen: false });
+    const cam = { x: sf.cam.x, y: sf.cam.y, z: sf.cam.z };
+    key('PageDown'); key('ArrowRight');
+    r.infiniteStill = sf.cam.x === cam.x && sf.cam.y === cam.y && sf.cam.z === cam.z;
+    r.infiniteNoPageButtons = document.querySelector('#presentbar [data-present="next"]').hidden
+      && document.getElementById('presentLabel').hidden;
+    a.stopPresenting();
+    delete document.documentElement.requestFullscreen;
+    return r;
+  `);
+  check('F5 presents: the bars go and full screen is asked for',
+    presentSetup.presenting && presentSetup.bodyClass && presentSetup.asked === 1 &&
+    !presentSetup.topbar && !presentSetup.pagebar && !presentSetup.zoombar && presentSetup.presentbar,
+    `presenting: ${presentSetup.presenting}, full screen asked ${presentSetup.asked} time(s); still showing — ` +
+    `top bar: ${presentSetup.topbar}, page bar: ${presentSetup.pagebar}, zoom bar: ${presentSetup.zoombar}; ` +
+    `corner bar showing: ${presentSetup.presentbar}`);
+  check('the toolbar is tucked below the bottom edge, not left in the way',
+    presentSetup.toolbarInert && present.toolbarBelow,
+    `takes presses: ${!presentSetup.toolbarInert}; its top at ${present.toolbarTop} in a ${present.vh}px window`);
+  check('and the board gets the room the bars had',
+    present.hAfter > presentSetup.hBefore,
+    `canvas ${presentSetup.hBefore}px tall before, ${present.hAfter}px while presenting`);
+  check('Page Down and the arrows step through the pages, each one filling the window',
+    presentSetup.pages === 3 && present.start === 0 && present.pd === 1 && present.ar === 2 &&
+    present.pastEnd === 2 && present.al === 1 && present.pu === 0 &&
+    Math.abs(present.centred3[0]) <= 1 && Math.abs(present.centred3[1]) <= 1,
+    `pages ${presentSetup.pages}; went ${present.start} → PgDn ${present.pd} → Right ${present.ar} → ` +
+    `Right again ${present.pastEnd} → Left ${present.al} → PgUp ${present.pu}; page 3 sits ` +
+    `${present.centred3.join(',')}px off centre`);
+  check('the corner bar says which page, and stops at the last',
+    present.label === '2 / 3' && present.nextDisabled,
+    `label "${present.label}" on page 2, next disabled on the last: ${present.nextDisabled}`);
+  check('Space never turns the page — it pans',
+    present.afterSpace === 0, `page after Space: ${present.afterSpace + 1}`);
+  check('with something selected the arrows nudge it; Page Down still turns the page',
+    present.nudged && present.pageAfterNudge === 0 && present.pdWithSelection === 1,
+    `nudged: ${present.nudged}, page after the arrow: ${present.pageAfterNudge + 1}, ` +
+    `after Page Down: ${present.pdWithSelection + 1}`);
+  check('the tools come up at the bottom edge and go again, but not under a pen that is writing',
+    present.edgeShows && present.awayHides && present.inkingNoShow,
+    `at the edge: ${present.edgeShows}, moved away: ${present.awayHides ? 'hidden' : 'STILL UP'}, ` +
+    `writing along the bottom: ${present.inkingNoShow ? 'stays tucked' : 'POPPED UP'}`);
+  check('the corner bar can pin the tools up for a touchscreen',
+    present.pinnedStays && present.unpinned,
+    `pinned stays up: ${present.pinnedStays}, unpinned tucks away: ${present.unpinned}`);
+  check('Escape finishes, and every bar comes back',
+    present.escOut && present.topbarBack && present.pagebarBack && present.presentbarGone &&
+    present.hBack === presentSetup.hBefore,
+    `out: ${present.escOut}, top bar: ${present.topbarBack}, page bar: ${present.pagebarBack}, ` +
+    `corner bar gone: ${present.presentbarGone}, canvas ${present.hBack}px (was ${presentSetup.hBefore})`);
+  check('leaving full screen by any route ends presenting',
+    present.fsAsked && present.fsExitStops, `asked: ${present.fsAsked}, stopped: ${present.fsExitStops}`);
+  check('an infinite board presents clean, and the page keys leave it alone',
+    present.infiniteStill && present.infiniteNoPageButtons,
+    `camera unmoved: ${present.infiniteStill}, page buttons hidden: ${present.infiniteNoPageButtons}`);
+
+  /* ---- the class timer ---- */
+  const timer = await js(`
+    const a = window.app, t = a.timer;
+    const { formatClock } = await import('app://board/js/ui/timer.js');
+    const r = {};
+    let T = 1000, chimes = 0;
+    const realNow = t.now, realChime = t.chime;
+    t.now = () => T; t.chime = () => { chimes++; };
+    const el = () => document.getElementById('classTimer');
+    const s0 = () => a.settings.timerBox;
+    const digits = () => el()?.querySelector('.ct-digits')?.textContent;
+    r.formats = [formatClock(300000), formatClock(59001), formatClock(600000), formatClock(0), formatClock(-5)];
+
+    a.command('timer.open');
+    r.opens = !!el() && t.state === 'idle' && t.picking;
+    r.presets = [...el().querySelectorAll('.ct-preset')].map((b) => b.dataset.minutes).join(',');
+    el().querySelector('.ct-preset[data-minutes="5"]').click();
+    r.starts = digits();
+    T += 61000; t.tick(); r.after61 = digits();
+    // redrawn from scratch after the wait, so a paused clock that quietly kept
+    // counting would show it
+    t.pause(); T += 100000; t.tick(); t.render(); r.pausedHolds = digits();
+    t.resume(); T += 1000; t.tick(); r.resumed = digits();
+    el().querySelector('.ct-more').click(); r.plusOne = digits();
+    // a board switch does not stop it
+    a.newBoard(true); a.textEditor.cancel();
+    r.survivesBoardSwitch = !!el() && t.state === 'running';
+    r.notInBoard = !JSON.stringify(a.store.toJSON()).includes('classTimer');
+    // run it out
+    T += 10 * 60000; t.tick();
+    r.done = t.state === 'done' && el().classList.contains('ct-done') && digits() === '0:00';
+    r.chimes = chimes;
+    t.tick(); T += 5000; t.tick();
+    r.chimesOnce = chimes;
+    // one more minute after time is up starts a fresh one
+    el().querySelector('.ct-more').click();
+    r.moreAfterDone = t.state === 'running' && digits() === '1:00';
+    el().querySelector('.ct-close').click();
+    r.closed = !el() && t.state === 'closed' && t._tick === null;
+
+    // --- choosing another time does not stop the one that is running ---
+    a.command('timer.open');
+    el().querySelector('.ct-preset[data-minutes="5"]').click();
+    T += 10000; t.tick();
+    el().querySelector('.ct-reset')?.click();
+    r.pickingKeepsRunning = t.picking && t.state === 'running' && !!el().querySelector('.ct-preset');
+    T += 20000; t.tick();
+    r.stillCounting = el().querySelector('.ct-now-digits')?.textContent;
+    el().querySelector('.ct-keep')?.click();
+    r.keptDigits = digits();
+    r.keptBack = !t.picking && t.state === 'running';
+    el().querySelector('.ct-reset')?.click();
+    el().querySelector('.ct-preset[data-minutes="3"]')?.click();
+    r.replaced = digits();
+
+    // --- the last thirty seconds are red ---
+    t.start({ ms: 45000 });
+    T += 14000; t.tick();
+    r.at31 = [digits(), el().classList.contains('ct-low')];
+    T += 2000; t.tick();
+    r.at29 = [digits(), el().classList.contains('ct-low')];
+    r.redInk = getComputedStyle(el().querySelector('.ct-digits')).color;
+    t.pause();
+    r.pausedLowStaysRed = el().classList.contains('ct-low');
+    t.resume();
+
+    // --- any length, typed ---
+    t.chooseAnother();
+    const input = () => el().querySelector('.ct-input');
+    const type = (v) => {
+      input().value = v;
+      input().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    };
+    type('soon');
+    r.badRefused = t.picking && input().classList.contains('ct-bad') && t.state === 'running';
+    type('7:30');
+    r.typed730 = digits();
+    t.chooseAnother(); type('1h 5m');
+    r.typedHour = digits();
+    t.chooseAnother(); el().querySelector('.ct-input').value = '90s'; el().querySelector('.ct-go').click();
+    r.typed90s = digits();
+
+    // --- it moves, it resizes, and it remembers where it was put ---
+    const card = el();
+    const b0 = { ...t.box };
+    const pe = (type, target, x, y) => target.dispatchEvent(new PointerEvent(type,
+      { pointerId: 44, button: 0, buttons: type === 'pointerup' ? 0 : 1, clientX: x, clientY: y, bubbles: true }));
+    const dg = card.querySelector('.ct-digits');
+    pe('pointerdown', dg, 100, 100);
+    for (let i = 1; i <= 6; i++) pe('pointermove', card, 100 + i * 20, 100 + i * 10);
+    pe('pointerup', card, 220, 160);
+    dg.click();                                       // the click a drag ends with
+    r.moved = [Math.round(t.box.x - b0.x), Math.round(t.box.y - b0.y)];
+    r.leftStyle = card.style.left === t.box.x + 'px';
+    r.dragDidNotPause = t.state === 'running';
+    const grip = card.querySelector('.ct-resize');
+    const w0 = card.offsetWidth;
+    pe('pointerdown', grip, 300, 300);
+    pe('pointermove', card, 300 + w0, 300);
+    pe('pointerup', card, 300 + w0, 300);
+    r.scale = +t.box.scale.toFixed(2);
+    r.scaledStyle = card.style.transform;
+    r.remembered = !!s0() && Math.round(s0().x) === Math.round(t.box.x) && +s0().scale.toFixed(2) === r.scale;
+    // dragged far off the edge, a corner of it stays on screen to drag back
+    pe('pointerdown', dg, 100, 100);
+    pe('pointermove', card, -5000, -5000);
+    pe('pointerup', card, -5000, -5000);
+    const cr = card.getBoundingClientRect(), sr = document.getElementById('stage').getBoundingClientRect();
+    r.stillReachable = cr.right > sr.left + 20 && cr.bottom > sr.top + 20;
+    t.box = { ...b0 }; a.settings.timerBox = { ...b0 }; t.place();
+    t.close();
+    t.now = realNow; t.chime = realChime;
+    return r;
+  `);
+  check('the clock reads the way a clock does',
+    timer.formats.join(' ') === '5:00 1:00 10:00 0:00 0:00', timer.formats.join(' '));
+  check('the class timer opens on its presets: 1, 3, 5 and 10 minutes',
+    timer.opens && timer.presets === '1,3,5,10', `opened: ${timer.opens}, presets: ${timer.presets}`);
+  check('it counts down from what you chose',
+    timer.starts === '5:00' && timer.after61 === '3:59',
+    `started at ${timer.starts}, 61 seconds later ${timer.after61}`);
+  check('pause holds it, and carrying on picks up where it stopped',
+    timer.pausedHolds === '3:59' && timer.resumed === '3:58',
+    `paused 100s: ${timer.pausedHolds}; one second after carrying on: ${timer.resumed}`);
+  check('one more minute adds a minute', timer.plusOne === '4:58', `now ${timer.plusOne}`);
+  check('it keeps running across a board switch, and is not part of any board',
+    timer.survivesBoardSwitch && timer.notInBoard,
+    `still running: ${timer.survivesBoardSwitch}, kept out of the board: ${timer.notInBoard}`);
+  check('at zero it chimes once and shows it is done',
+    timer.done && timer.chimes === 1 && timer.chimesOnce === 1,
+    `done: ${timer.done}, chimes at zero: ${timer.chimes}, after two more ticks: ${timer.chimesOnce}`);
+  check('choosing another time leaves the running one going until a new one is picked',
+    timer.pickingKeepsRunning && timer.stillCounting === '4:30' && timer.keptDigits === '4:30' && timer.keptBack &&
+    timer.replaced === '3:00',
+    `still running under the list: ${timer.pickingKeepsRunning}, counting meanwhile: ${timer.stillCounting} ` +
+    `(wanted 4:30), after Keep this one: ${timer.keptDigits} and back: ${timer.keptBack}; picking 3 min shows ${timer.replaced}`);
+  check('the last thirty seconds are red',
+    timer.at31[0] === '0:31' && !timer.at31[1] && timer.at29[0] === '0:29' && timer.at29[1] &&
+    timer.redInk === 'rgb(209, 52, 56)' && timer.pausedLowStaysRed,
+    `at ${timer.at31[0]} red: ${timer.at31[1]}; at ${timer.at29[0]} red: ${timer.at29[1]}; digit colour ` +
+    `${timer.redInk}; paused in the last 30s still red: ${timer.pausedLowStaysRed}`);
+  check('any length can be typed, and nonsense is refused without stopping the clock',
+    timer.badRefused && timer.typed730 === '7:30' && timer.typedHour === '1:05:00' && timer.typed90s === '1:30',
+    `"soon" refused: ${timer.badRefused}; "7:30" → ${timer.typed730}; "1h 5m" → ${timer.typedHour}; ` +
+    `"90s" → ${timer.typed90s}`);
+  check('the clock can be dragged anywhere, and a drag never pauses it',
+    timer.moved[0] === 120 && timer.moved[1] === 60 && timer.leftStyle && timer.dragDidNotPause,
+    `moved by ${timer.moved.join(',')} (wanted 120,60), drawn there: ${timer.leftStyle}, still running: ${timer.dragDidNotPause}`);
+  check('dragging its corner resizes it, and where and how big it is are remembered',
+    timer.scale >= 1.9 && timer.scale <= 2.1 && /scale\(/.test(timer.scaledStyle) && timer.remembered,
+    `scale ${timer.scale} after dragging the corner one width out (wanted about 2), style "${timer.scaledStyle}", ` +
+    `saved in settings: ${timer.remembered}`);
+  check('dragged off the edge, part of it stays on screen to drag back',
+    timer.stillReachable, `reachable: ${timer.stillReachable}`);
+  check('one more minute after time is up starts a fresh minute; closing stops it',
+    timer.moreAfterDone && timer.closed,
+    `fresh minute: ${timer.moreAfterDone}, closed and stopped ticking: ${timer.closed}`);
+  /*
+   * The same clock, driven with REAL mouse presses and key strokes from
+   * outside the page, not element.click(). A synthetic click goes straight
+   * to the button it is called on; a real one goes wherever the browser
+   * decides - and the first build of this clock captured the pointer on the
+   * card, so every real click landed on the card instead of the button. The
+   * checks above all passed while no button in the clock could be pressed.
+   */
+  {
+    const where = async (sel) => js(`
+      const b = document.querySelector('${sel}');
+      if (!b) return null;
+      const q = b.getBoundingClientRect();
+      return { x: Math.round(q.left + q.width / 2), y: Math.round(q.top + q.height / 2) };
+    `);
+    const press = async (sel) => {
+      const p = await where(sel);
+      if (!p) return false;
+      win.webContents.sendInputEvent({ type: 'mouseMove', x: p.x, y: p.y });
+      win.webContents.sendInputEvent({ type: 'mouseDown', x: p.x, y: p.y, button: 'left', clickCount: 1 });
+      win.webContents.sendInputEvent({ type: 'mouseUp', x: p.x, y: p.y, button: 'left', clickCount: 1 });
+      await sleep(120);
+      return true;
+    };
+    const type = async (text) => {
+      for (const ch of text) win.webContents.sendInputEvent({ type: 'char', keyCode: ch });
+      await sleep(80);
+    };
+    const state = () => js(`
+      const t = window.app.timer;
+      return { state: t.state, picking: t.picking, total: t.total, left: Math.round(t.remaining() / 1000),
+               x: Math.round(t.box.x), y: Math.round(t.box.y), digits: document.querySelector('#classTimer .ct-digits')?.textContent || null };
+    `);
+    const log = [];
+    const step = async (label, fn) => { const ok = await fn(); const s = await state(); log.push(`${label}${ok === false ? ' (NOT FOUND)' : ''} → ${s.state}${s.picking ? '+list' : ''} ${s.left}s`); return s; };
+
+    await js(`window.app.timer.close(); window.app.textEditor.cancel(); window.app.command('timer.open');`);
+    await sleep(150);
+    const preset = await step('press 5 min', () => press('#classTimer .ct-preset[data-minutes="5"]'));
+    const paused = await step('press pause', () => press('#classTimer .ct-pause'));
+    const resumed = await step('press carry on', () => press('#classTimer .ct-resume'));
+    const more = await step('press +1', () => press('#classTimer .ct-more'));
+    const listing = await step('press choose another', () => press('#classTimer .ct-reset'));
+    await step('press the box', () => press('#classTimer .ct-input'));
+    await type('30s');
+    const typed = await step('type 30s and press Start', () => press('#classTimer .ct-go'));
+    await step('press choose another', () => press('#classTimer .ct-reset'));
+    const kept = await step('press keep this one', () => press('#classTimer .ct-keep'));
+    // a real drag by the digits: moves the clock and does not pause it
+    const d = (await where('#classTimer .ct-digits')) || { x: 0, y: 0, missing: true };
+    const before = await state();
+    if (d.missing) log.push('no running clock to drag');
+    win.webContents.sendInputEvent({ type: 'mouseMove', x: d.x, y: d.y });
+    win.webContents.sendInputEvent({ type: 'mouseDown', x: d.x, y: d.y, button: 'left', clickCount: 1 });
+    for (let i = 1; i <= 8; i++) { win.webContents.sendInputEvent({ type: 'mouseMove', x: d.x + i * 15, y: d.y + i * 5, button: 'left' }); await sleep(16); }
+    win.webContents.sendInputEvent({ type: 'mouseUp', x: d.x + 120, y: d.y + 40, button: 'left', clickCount: 1 });
+    await sleep(150);
+    const dragged = await state();
+    log.push(`drag by the digits → moved ${dragged.x - before.x},${dragged.y - before.y}, ${dragged.state}`);
+    const closed = await step('press close', () => press('#classTimer .ct-close'));
+    await js(`const t = window.app.timer; t.box = { x: 16, y: 14, scale: 1 }; window.app.settings.timerBox = { ...t.box };`);
+
+    check('the clock’s buttons answer a real mouse, not just a scripted click',
+      preset.state === 'running' && paused.state === 'paused' && resumed.state === 'running' &&
+      more.left > 300 && listing.picking && listing.state === 'running' && closed.state === 'closed',
+      log.join('; '));
+    check('typing a time and pressing Start starts it',
+      typed.state === 'running' && !typed.picking && typed.total === 30000 && kept.state === 'running' && !kept.picking,
+      log.join('; '));
+    check('a real drag moves the clock and leaves it running',
+      dragged.x - before.x >= 100 && dragged.state === 'running', log.join('; '));
+  }
+
+  {
+    const sw = await fs.readFile(path.join(__dirname, '..', 'src', 'sw.js'), 'utf8');
+    const missing = ['./js/ui/present.js', './js/ui/timer.js'].filter((f) => !sw.includes(`'${f}'`));
+    check('the web version keeps the teaching kit for offline use',
+      missing.length === 0, missing.length ? `sw.js does not precache ${missing.join(', ')}` : 'both precached');
+  }
+
+  /* ---- finding LibreOffice, including on a drive that is not C ---- */
+  {
+    const { resolveSoffice, sofficeCandidates } = require('../soffice.js');
+    /*
+     * The search is asked what it WOULD find on a machine laid out a given
+     * way, rather than what it finds on this one - so the case that matters
+     * (LibreOffice moved off a full system drive) is testable on a build
+     * machine that has no LibreOffice anywhere.
+     */
+    const machine = (...installed) => (p) => installed.includes(p) ||
+      // a drive exists when something is installed on it, which is how a real one behaves
+      (/^[A-Za-z]:\\$/.test(p) && installed.some((i) => i.toUpperCase().startsWith(p.toUpperCase())));
+    const WIN = { platform: 'win32' };
+    const onD = 'D:\\LibreOffice\\program\\soffice.exe';
+    const onDProgs = 'D:\\Program Files\\LibreOffice\\program\\soffice.exe';
+    const onC = 'C:\\Program Files\\LibreOffice\\program\\soffice.exe';
+
+    const movedToD = resolveSoffice({ ...WIN, env: {}, exists: machine(onD) });
+    check('LibreOffice installed on a second drive is found',
+      movedToD === onD,
+      `found ${movedToD || 'nothing'}, wanted ${onD} — people with a small C: move a 700MB install, ` +
+      `and the old search only ever looked at C:`);
+
+    const progsOnD = resolveSoffice({ ...WIN, env: {}, exists: machine(onDProgs) });
+    check('and the Program Files shape on that drive too',
+      progsOnD === onDProgs, `found ${progsOnD || 'nothing'}, wanted ${onDProgs}`);
+
+    const both = resolveSoffice({ ...WIN, env: {}, exists: machine(onC, onD) });
+    check('with copies on two drives the system drive still wins',
+      both === onC, `found ${both}, wanted ${onC} — the sweep must stay in order, not take the last match`);
+
+    const told = resolveSoffice({ ...WIN, env: { GAZBOARD_SOFFICE: 'X:\\odd\\place\\soffice.exe' },
+                                  exists: machine(onC, 'X:\\odd\\place\\soffice.exe') });
+    check('being told outright where it is beats anything found by searching',
+      told === 'X:\\odd\\place\\soffice.exe',
+      `found ${told} — GAZBOARD_SOFFICE is the escape hatch for a layout the sweep does not guess`);
+
+    const staleVar = resolveSoffice({ ...WIN, env: { GAZBOARD_SOFFICE: 'X:\\gone.exe' }, exists: machine(onC) });
+    check('and a stale one is ignored rather than believed',
+      staleVar === onC,
+      `found ${staleVar || 'nothing'}, wanted ${onC} — pointing the variable at a file that was deleted ` +
+      `must not turn a working install into "not installed"`);
+
+    const viaPath = resolveSoffice({ platform: 'linux', env: { PATH: '/nope:/opt/lo/bin' },
+                                     exists: machine('/opt/lo/bin/soffice') });
+    check('an install reachable on PATH is found without any of the fixed folders',
+      viaPath === '/opt/lo/bin/soffice', `found ${viaPath || 'nothing'}`);
+
+    const nowhere = resolveSoffice({ ...WIN, env: {}, exists: () => false });
+    check('a machine without LibreOffice still answers plainly',
+      nowhere === null, `got ${JSON.stringify(nowhere)}, wanted null — Word and slides fall back, ` +
+      `spreadsheets say to install it, and neither can happen if this throws`);
+
+    const off = resolveSoffice({ ...WIN, env: { GAZBOARD_DISABLE_LIBREOFFICE: '1' }, exists: machine(onC) });
+    check('the suite can still switch it off on a machine that has it',
+      off === null, `got ${off} — npm run smoke:builtin exercises the built-in converter, which needs this`);
+
+    /*
+     * A letter that is not there must cost one question, not four. On an
+     * office machine with a mapped share that is currently offline, each
+     * question is the one that takes a moment to answer.
+     */
+    const knocks = [];
+    resolveSoffice({ ...WIN, env: {}, exists: (p) => { knocks.push(p); return false; } });
+    const onDeadDrive = knocks.filter((k) => /^D:/i.test(k));
+    const everyLetter = knocks.filter((k) => /^[C-Z]:/i.test(k));
+    check('a drive that is not there is knocked on once, not for every folder',
+      onDeadDrive.length === 1 && onDeadDrive[0] === 'D:\\' && everyLetter.length === 24,
+      `asked about D: ${onDeadDrive.length} time(s) (${onDeadDrive.join(', ') || 'never'}) and about ` +
+      `lettered drives ${everyLetter.length} time(s) in total — wanted 1 and 24, not 3 and 72`);
+
+    const list = sofficeCandidates('win32', {});
+    const floppies = list.filter((c) => /^[AB]:/i.test(c));
+    check('the drive sweep leaves the floppy letters alone',
+      floppies.length === 0,
+      `${floppies.length} A:/B: path(s) in the list — on a machine that still has one, looking makes it grind`);
+    check('and it covers every other drive, both layouts',
+      list.filter((c) => /^[C-Z]:/i.test(c)).length === 24 * 3,
+      `${list.filter((c) => /^[C-Z]:/i.test(c)).length} drive path(s), wanted ${24 * 3} (24 letters x 3 shapes)`);
+  }
+
+  /* ---- the app in other languages ---- */
+  {
+    const { extract } = require('../scripts/i18n-extract.js');
+    const { checkLanguage } = require('../scripts/i18n-check.js');
+    const fsSync = require('node:fs');
+    const { strings, problems } = extract();
+    check('every sentence the app shows can be found for translating',
+      strings.length > 800 && problems.length === 0,
+      `${strings.length} sentences found; t() calls with nothing readable to translate: ` +
+      `${problems.length ? problems.slice(0, 5).join(' | ') : 'none'}`);
+    const codes = ['bn', 'zh-Hans', 'zh-Hant', 'ar', 'es', 'pt-BR'];
+    for (const code of codes) {
+      const r = checkLanguage(code, strings);
+      const miss = Array.isArray(r.missing) ? r.missing : [];
+      const extra = Array.isArray(r.extra) ? r.extra : [];
+      check(`${code}: every sentence translated, with its placeholders and markup intact`,
+        miss.length === 0 && extra.length === 0 && r.problems.length === 0,
+        `${strings.length - miss.length}/${strings.length} translated; missing: ${miss.slice(0, 3).map((s) => JSON.stringify(s)).join(', ') || 'none'}; ` +
+        `left over: ${extra.slice(0, 3).map((s) => JSON.stringify(s)).join(', ') || 'none'}; ` +
+        `problems: ${r.problems.slice(0, 3).join(' | ') || 'none'}`);
+    }
+    const sw = fsSync.readFileSync(path.join(__dirname, '..', 'src', 'sw.js'), 'utf8');
+    const uncached = [...codes.map((c) => `./locales/${c}.json`), './js/i18n.js'].filter((f) => !sw.includes(`'${f}'`));
+    check('the web version keeps every language for offline use',
+      uncached.length === 0, `not precached: ${uncached.join(', ') || 'none'}`);
+    const bn = JSON.parse(fsSync.readFileSync(path.join(__dirname, '..', 'src', 'locales', 'bn.json'), 'utf8'));
+    check('Bangla keeps the words Bangladeshi teachers actually use',
+      bn['Pen'] === undefined ? /পেন/.test(bn['Black pen'] || bn['Pen (last colour used)'] || '') : bn['Pen'] === 'পেন',
+      `pen is written: ${bn['Pen'] || bn['Black pen'] || bn['Pen (last colour used)']} — পেন, never কলম`);
+  }
+
+  const lang = await js(`
+    const i = await import('app://board/js/i18n.js');
+    const r = {};
+    r.detect = {
+      tw: i.detectLanguage(['zh-TW']), hk: i.detectLanguage(['zh-HK']), cn: i.detectLanguage(['zh-CN']),
+      hant: i.detectLanguage(['zh-Hant-SG']), pt: i.detectLanguage(['pt-PT']), bn: i.detectLanguage(['bn-BD']),
+      firstKnown: i.detectLanguage(['fr-FR', 'ar-EG']), none: i.detectLanguage(['fr-FR', 'de'])
+    };
+    r.smokeIsEnglish = i.resolveLanguage('auto') === 'en' && i.currentLanguage() === 'en';
+    r.englishIsKey = i.t('Export as PNG…') === 'Export as PNG…' && i.t('Page {n} of {total}', { n: 2, total: 5 }) === 'Page 2 of 5';
+    await i.setLanguage('bn');
+    r.bnSettings = i.t('Settings');
+    r.bnFilled = i.t('Page {n} of {total}', { n: 2, total: 5 });
+    r.bnMissingFallsBack = i.t('A sentence no file has') === 'A sentence no file has';
+    r.bnHtmlLang = document.documentElement.lang;
+    await i.setLanguage('ar');
+    r.arDir = document.documentElement.dir;
+    await i.setLanguage('en');
+    r.backDir = document.documentElement.dir;
+    // the bundled Bangla face really loads and really draws
+    const got = await document.fonts.load('16px "GazBoard Noto Bengali"', '\\u0995\\u0996\\u0997');
+    r.bnFace = got.length;
+    const c = document.createElement('canvas').getContext('2d');
+    const word = '\\u0995\\u09BE\\u09B2\\u09CB \\u09AA\\u09C7\\u09A8';
+    c.font = '32px "GazBoard Noto Bengali", monospace'; const ours = c.measureText(word).width;
+    c.font = '32px monospace'; const fallback = c.measureText(word).width;
+    r.bnDrawnWithOurs = Math.abs(ours - fallback) > 0.5;
+    r.bnWidths = [Math.round(ours), Math.round(fallback)];
+    return r;
+  `);
+  check('the machine’s language is picked up, Chinese by region',
+    lang.detect.tw === 'zh-Hant' && lang.detect.hk === 'zh-Hant' && lang.detect.hant === 'zh-Hant' &&
+    lang.detect.cn === 'zh-Hans' && lang.detect.pt === 'pt-BR' && lang.detect.bn === 'bn' &&
+    lang.detect.firstKnown === 'ar' && lang.detect.none === 'en',
+    JSON.stringify(lang.detect));
+  check('the suite itself always runs in English, and English is the key',
+    lang.smokeIsEnglish && lang.englishIsKey, `smoke in English: ${lang.smokeIsEnglish}, t() returns the English: ${lang.englishIsKey}`);
+  check('switching language translates, fills placeholders, and falls back to English for anything missing',
+    lang.bnSettings === 'সেটিংস' && /2/.test(lang.bnFilled) && /5/.test(lang.bnFilled) && lang.bnFilled !== 'Page 2 of 5' &&
+    lang.bnMissingFallsBack && lang.bnHtmlLang === 'bn',
+    `Settings → ${lang.bnSettings}; "Page 2 of 5" → ${lang.bnFilled}; missing falls back: ${lang.bnMissingFallsBack}; lang=${lang.bnHtmlLang}`);
+  check('Arabic turns the page right to left, and English turns it back',
+    lang.arDir === 'rtl' && lang.backDir === 'ltr', `Arabic: ${lang.arDir}, back in English: ${lang.backDir}`);
+  check('Bangla comes with the app, so it looks right on a machine without a Bangla font',
+    lang.bnFace > 0 && lang.bnDrawnWithOurs,
+    `faces loaded for Bangla: ${lang.bnFace}; drawn with ours rather than a stand-in: ${lang.bnDrawnWithOurs} (widths ${lang.bnWidths.join(' vs ')})`);
+
+  /* ---- the optional Chinese font: fetched once, checked, kept, removable ---- */
+  const fontPack = await js(`
+    const a = window.app;
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    const fp = await import('app://board/js/fontpack.js');
+    const r = {};
+    // The download itself is exercised offline: the bundled Bangla face plays
+    // the part of the Chinese file, served from the app instead of the web.
+    const stand = 'noto-sans-bengali-bengali-400-normal.woff2';
+    const buf = await (await fetch('app://board/assets/fonts/board/' + stand)).arrayBuffer();
+    fp.PACKS.zz = { id: 'zz', lang: 'xx', family: 'GazBoard Test Pack', file: stand, bytes: buf.byteLength, sha256: await fp.sha256(buf) };
+    await fp.remove('zz');
+    const inDoc = (fam) => [...document.fonts].some((f) => f.family.replace(/["']/g, '') === fam && f.status === 'loaded');
+    const dead = () => 'app://board/assets/fonts/board/not-there.woff2';
+    const good = (f) => 'app://board/assets/fonts/board/' + f;
+    const seen = [];
+    let progress = 0;
+    const got = await fp.download('zz', { sources: [dead, good], fetchImpl: (u, o) => { seen.push(u); return fetch(u, o); },
+      onProgress: (g) => { progress = Math.max(progress, g); } });
+    r.ok = got.ok; r.triedBoth = seen.length === 2; r.progressToEnd = progress === buf.byteLength;
+    r.installed = await fp.isInstalled('zz'); r.inUse = fp.isActive('zz') && inDoc('GazBoard Test Pack');
+
+    fp.PACKS.zy = { ...fp.PACKS.zz, id: 'zy', family: 'GazBoard Test Wrong', sha256: '0'.repeat(64) };
+    const wrong = await fp.download('zy', { sources: [good] });
+    r.wrongRefused = !wrong.ok && !(await fp.isInstalled('zy')) && !inDoc('GazBoard Test Wrong');
+    r.wrongSays = wrong.error;
+
+    await fp.remove('zz');
+    const fromFile = await fp.installFromFile('zz', new File([buf], stand));
+    r.fileTaken = fromFile.ok && await fp.isInstalled('zz');
+    const junk = await fp.installFromFile('zz', new File([new Uint8Array(4096)], 'font.woff2'));
+    r.junkRefused = !junk.ok; r.junkSays = junk.error;
+
+    await fp.remove('zz');
+    r.removed = !(await fp.isInstalled('zz')) && !fp.isActive('zz') && !inDoc('GazBoard Test Pack');
+
+    // starting up never reaches for the network by itself
+    const realFetch = window.fetch; let calls = 0;
+    window.fetch = (...x) => { calls++; return realFetch(...x); };
+    await fp.loadInstalled();
+    window.fetch = realFetch;
+    r.startupFetches = calls;
+    delete fp.PACKS.zz; delete fp.PACKS.zy;
+
+    r.packs = Object.values(fp.PACKS).map((p) => ({ id: p.id, lang: p.lang, file: p.file, bytes: p.bytes, sha: p.sha256 }));
+    r.sources = fp.SOURCES.map((s) => s('F'));
+    r.packFor = { hans: fp.packFor('zh-Hans')?.id, hant: fp.packFor('zh-Hant')?.id, bn: fp.packFor('bn') };
+
+    // the Settings row: offered in Chinese, absent in English
+    const i = await import('app://board/js/i18n.js');
+    await i.setLanguage('zh-Hans');
+    if (a.panels.open) a.panels.close();
+    a.panels.settings();
+    // the row asks the device whether the font is already there before it
+    // draws its buttons, and that answer can take a moment on a busy machine
+    const until = async (sel) => {
+      for (let n = 0; n < 60; n++) { if (document.querySelector(sel)) return true; await sleep(50); }
+      return false;
+    };
+    r.rowWaited = await until('#panelBody .fp-download');
+    r.rowInChinese = document.querySelector('#panelBody .fp-download')?.textContent || null;
+    r.rowHtml = (document.querySelector('#panelBody .fontpack')?.outerHTML || 'no .fontpack at all').slice(0, 160);
+    r.addFileInChinese = !!document.querySelector('#panelBody .fp-file');
+    a.panels.close();
+    await i.setLanguage('en');
+    a.panels.settings(); await sleep(400);
+    r.rowInEnglish = !!document.querySelector('#panelBody .fontpack');
+    a.panels.close();
+    const { FONTS } = await import('app://board/js/ui/palettes.js');
+    r.stacksCarryIt = FONTS.every((f) => f.stack.includes("'GazBoard Noto Sans SC'") && f.stack.includes("'GazBoard Noto Sans TC'"));
+    return r;
+  `);
+  check('the Chinese font downloads, falls back to the second source, and is put to use',
+    fontPack.ok && fontPack.triedBoth && fontPack.progressToEnd && fontPack.installed && fontPack.inUse,
+    `downloaded: ${fontPack.ok}, tried the second source after the first failed: ${fontPack.triedBoth}, ` +
+    `progress reached the end: ${fontPack.progressToEnd}, kept: ${fontPack.installed}, drawing with it: ${fontPack.inUse}`);
+  check('a file that is not exactly the right one is refused, downloaded or added by hand',
+    fontPack.wrongRefused && fontPack.junkRefused && fontPack.fileTaken,
+    `wrong download refused: ${fontPack.wrongRefused} ("${fontPack.wrongSays}"); junk file refused: ` +
+    `${fontPack.junkRefused} ("${fontPack.junkSays}"); the right file added by hand: ${fontPack.fileTaken}`);
+  check('it can be removed again, and starting the app never downloads anything by itself',
+    fontPack.removed && fontPack.startupFetches === 0,
+    `removed cleanly: ${fontPack.removed}; network requests at start-up: ${fontPack.startupFetches}`);
+  check('Settings offers it in Chinese and not in English',
+    !!fontPack.rowInChinese && fontPack.addFileInChinese && !fontPack.rowInEnglish &&
+    fontPack.packFor.hans === 'sc' && fontPack.packFor.hant === 'tc' && fontPack.packFor.bn === null,
+    `in Chinese: "${fontPack.rowInChinese}", add-a-file button: ${fontPack.addFileInChinese} (row: ${fontPack.rowHtml}); ` +
+    `in English: ${fontPack.rowInEnglish ? 'SHOWN' : 'not shown'}; ` +
+    `packs: ${JSON.stringify(fontPack.packFor)}`);
+  check('every board face falls back to the downloaded Chinese font when it is there',
+    fontPack.stacksCarryIt, `all five font stacks name both Chinese faces: ${fontPack.stacksCarryIt}`);
+  {
+    const fsSync = require('node:fs');
+    const crypto = require('node:crypto');
+    const dir = path.join(__dirname, '..', 'fonts');
+    const bad = fontPack.packs.filter((p) => {
+      try {
+        const b = fsSync.readFileSync(path.join(dir, p.file));
+        return b.length !== p.bytes || crypto.createHash('sha256').update(b).digest('hex') !== p.sha;
+      } catch { return true; }
+    });
+    const lic = (() => { try { return fsSync.readFileSync(path.join(dir, 'LICENSE-noto-sans-cjk.txt'), 'utf8'); } catch { return ''; } })();
+    check('the font files the app asks for are the ones in the repo, byte for byte, with their licence',
+      fontPack.packs.length === 2 && bad.length === 0 && /SIL Open Font License/.test(lic),
+      `packs: ${fontPack.packs.map((p) => p.file).join(', ')}; not matching the repo's fonts/ folder: ` +
+      `${bad.map((p) => p.file).join(', ') || 'none'}; OFL licence beside them: ${/SIL Open Font License/.test(lic)}`);
+    const html = fsSync.readFileSync(path.join(__dirname, '..', 'src', 'index.html'), 'utf8');
+    const csp = (html.match(/connect-src([^;]*);/) || [])[1] || '';
+    const hosts = fontPack.sources.map((u) => new URL(u).origin);
+    const blocked = hosts.filter((o) => !csp.includes(o));
+    check('the page is allowed to reach both download places, and nothing else new',
+      blocked.length === 0 && hosts.length === 2,
+      `sources: ${hosts.join(', ')}; not allowed by the page: ${blocked.join(', ') || 'none'}`);
+  }
+
+  /* the whole app, switched from Settings: the window reloads in the new language */
+  const relaunch = async (code) => {
+    await js(`
+      const s = JSON.parse(localStorage.getItem('gazboard.settings') || '{}');
+      ${code ? `s.language = '${code}';` : 'delete s.language;'}
+      localStorage.setItem('gazboard.settings', JSON.stringify(s));
+    `);
+    await new Promise((res) => { win.webContents.once('did-finish-load', res); win.webContents.reload(); });
+    for (let i = 0; i < 50; i++) {
+      await sleep(100);
+      if (await js(`return !!(window.app && window.app.store);`)) break;
+    }
+    await sleep(400);
+  };
+  const { Menu } = require('electron');
+  const ui = async () => js(`
+    const q = (s) => document.querySelector(s);
+    const zb = q('#zoombar').getBoundingClientRect();
+    return {
+      lang: document.documentElement.lang, dir: document.documentElement.dir,
+      present: q('#btnPresent')?.textContent.trim(),
+      selectTitle: q('#toolbar .tool[data-tool="select"]')?.title,
+      helpTitle: q('#btnHelp')?.title,
+      zoombarLeft: zb.left < window.innerWidth / 2,
+      canvasDir: getComputedStyle(q('#c')).direction,
+      booted: !!(window.app && window.app.store)
+    };
+  `);
+  await relaunch('bn');
+  const bnUi = await ui();
+  const bnMenu = Menu.getApplicationMenu()?.items.map((i) => i.label) || [];
+  await relaunch('ar');
+  const arUi = await ui();
+  await relaunch(null);
+  const enUi = await ui();
+  const enMenu = Menu.getApplicationMenu()?.items.map((i) => i.label) || [];
+  const bnDict = JSON.parse(require('node:fs').readFileSync(path.join(__dirname, '..', 'src', 'locales', 'bn.json'), 'utf8'));
+  check('chosen in Settings, Bangla reaches the toolbar, the top bar and the menu bar',
+    bnUi.booted && bnUi.lang === 'bn' && bnUi.present === bnDict['Present'] &&
+    bnUi.selectTitle === bnDict['Select (V)'] && bnUi.helpTitle === bnDict['Keyboard shortcuts'] &&
+    (process.platform === 'darwin' || bnMenu.includes(bnDict['File'])),
+    `lang ${bnUi.lang}; Present button "${bnUi.present}"; Select tooltip "${bnUi.selectTitle}"; ` +
+    `help tooltip "${bnUi.helpTitle}"; menu bar: ${bnMenu.join(' | ')}`);
+  check('Arabic mirrors the frame but never the board',
+    arUi.booted && arUi.dir === 'rtl' && arUi.zoombarLeft && arUi.canvasDir === 'ltr',
+    `dir ${arUi.dir}; zoom bar on the left: ${arUi.zoombarLeft}; board canvas direction: ${arUi.canvasDir}`);
+  check('and back in English everything is English again',
+    enUi.booted && enUi.lang === 'en' && enUi.dir === 'ltr' && enUi.present === 'Present' && !enUi.zoombarLeft &&
+    (process.platform === 'darwin' || enMenu.includes('File')),
+    `lang ${enUi.lang}, dir ${enUi.dir}, Present button "${enUi.present}", zoom bar on the left: ${enUi.zoombarLeft}, menu: ${enMenu.join(' | ')}`);
 
   /* ---- errors ---- */
   const errs = await js(`return window.__errors || [];`);

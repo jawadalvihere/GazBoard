@@ -1,22 +1,23 @@
 // "Page setup" dialog for PDF export.
 
 import { h } from './popover.js';
+import { t } from '../i18n.js';
 
 /** Paper sizes in millimetres, portrait. */
 export const PAPER = [
   { id: 'a4',     label: 'A4',       w: 210,   h: 297 },
-  { id: 'letter', label: 'Letter',   w: 215.9, h: 279.4 },
+  { id: 'letter', label: t('Letter'), w: 215.9, h: 279.4 },
   { id: 'a3',     label: 'A3',       w: 297,   h: 420 },
-  { id: 'legal',  label: 'Legal',    w: 215.9, h: 355.6 },
+  { id: 'legal',  label: t('Legal'),  w: 215.9, h: 355.6 },
   { id: 'a5',     label: 'A5',       w: 148,   h: 210 },
-  { id: 'fit',    label: 'Fit board', w: 0,    h: 0 }     // page takes the board's own shape
+  { id: 'fit',    label: t('Fit board'), w: 0,    h: 0 }     // page takes the board's own shape
 ];
 
 export const MARGINS = [
-  { id: 'none',   label: 'None',   mm: 0 },
-  { id: 'narrow', label: 'Narrow', mm: 8 },
-  { id: 'normal', label: 'Normal', mm: 15 },
-  { id: 'wide',   label: 'Wide',   mm: 25 }
+  { id: 'none',   label: t('None'),   mm: 0 },
+  { id: 'narrow', label: t('Narrow'), mm: 8 },
+  { id: 'normal', label: t('Normal'), mm: 15 },
+  { id: 'wide',   label: t('Wide'),   mm: 25 }
 ];
 
 export const paperById = (id) => PAPER.find((p) => p.id === id) || PAPER[0];
@@ -126,7 +127,7 @@ export function choosePageSetup(app, box) {
     };
     document.addEventListener('keydown', onKey, true);
 
-    card.appendChild(h('h3', {}, 'Export as PDF'));
+    card.appendChild(h('h3', {}, t('Export as PDF')));
     const summary = h('p', { style: 'margin-bottom:14px;font-size:13px;color:var(--text-2)' });
 
     const rowStyle = 'display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap';
@@ -145,16 +146,16 @@ export function choosePageSetup(app, box) {
       return wrap;
     };
 
-    const paperRow = group('Page size', PAPER, () => opts.paper, (v) => (opts.paper = v));
-    const orientRow = group('Orientation',
-      [{ id: 'landscape', label: 'Landscape' }, { id: 'portrait', label: 'Portrait' }],
+    const paperRow = group(t('Page size'), PAPER, () => opts.paper, (v) => (opts.paper = v));
+    const orientRow = group(t('Orientation'),
+      [{ id: 'landscape', label: t('Landscape') }, { id: 'portrait', label: t('Portrait') }],
       () => opts.orientation, (v) => (opts.orientation = v));
-    const marginRow = group('Margin', MARGINS, () => opts.margin, (v) => (opts.margin = v));
-    const modeRow = group('Layout',
-      [{ id: 'fit', label: 'Fit on one page' }, { id: 'tile', label: 'Across several pages' }],
+    const marginRow = group(t('Margin'), MARGINS, () => opts.margin, (v) => (opts.margin = v));
+    const modeRow = group(t('Layout'),
+      [{ id: 'fit', label: t('Fit on one page') }, { id: 'tile', label: t('Across several pages') }],
       () => opts.mode, (v) => (opts.mode = v));
-    const qualityRow = group('Quality',
-      [{ id: 1.5, label: 'Draft' }, { id: 2, label: 'Standard' }, { id: 3, label: 'High' }],
+    const qualityRow = group(t('Quality'),
+      [{ id: 1.5, label: t('Draft') }, { id: 2, label: t('Standard') }, { id: 3, label: t('High') }],
       () => opts.quality, (v) => (opts.quality = v));
 
     card.append(paperRow, orientRow, marginRow, modeRow, qualityRow, summary);
@@ -167,16 +168,18 @@ export function choosePageSetup(app, box) {
       const L = layoutPages(box, opts);
       const sheets = L.cols * L.rows;
       summary.textContent = fit
-        ? `One sheet, ${Math.round(L.pageW)} × ${Math.round(L.pageH)} mm — the page takes the board's own shape.`
+        ? t("One sheet, {w} × {h} mm — the page takes the board's own shape.", { w: Math.round(L.pageW), h: Math.round(L.pageH) })
         : opts.mode === 'fit'
-          ? `One sheet at ${Math.round(L.scale * 100)}% of actual size.`
-          : `${sheets} sheet${sheets === 1 ? '' : 's'} — ${L.cols} across × ${L.rows} down, at actual size.`;
+          ? t('One sheet at {pct}% of actual size.', { pct: Math.round(L.scale * 100) })
+          : sheets === 1
+            ? t('{n} sheet — {cols} across × {rows} down, at actual size.', { n: sheets, cols: L.cols, rows: L.rows })
+            : t('{n} sheets — {cols} across × {rows} down, at actual size.', { n: sheets, cols: L.cols, rows: L.rows });
     };
     paint();
 
     card.appendChild(h('div', { class: 'actions' },
-      h('button', { class: 'btn', onclick: () => done(null) }, 'Cancel'),
-      h('button', { class: 'btn primary', onclick: () => done({ ...opts }) }, 'Export')));
+      h('button', { class: 'btn', onclick: () => done(null) }, t('Cancel')),
+      h('button', { class: 'btn primary', onclick: () => done({ ...opts }) }, t('Export'))));
     overlay.classList.add('show');
   });
 }

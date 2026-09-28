@@ -2,7 +2,7 @@
 
 import { boundsOf } from '../core/store.js';
 import { fitFontSize, readableText, wrapText, clamp } from '../core/util.js';
-import { faceOf } from '../core/render.js';
+import { faceOf, noteTypeRange, inkPaint } from '../core/render.js';
 
 export class TextEditor {
   constructor(app) {
@@ -47,6 +47,14 @@ export class TextEditor {
       app.surface.invalidate();
     }
 
+    // The canvas must stop drawing this object's text while the textarea is
+    // showing it, or the two sit a pixel apart and smear into each other.
+    app.surface.editing = { id: obj.id, cell };
+    // On a phone the keyboard takes most of the screen and the toolbar ends up
+    // sitting on the very box being typed into. The pens are no use mid-word,
+    // so they stand down until the words are finished - see app.css.
+    document.body.classList.add('typing');
+
     this.place();
 
     ta.addEventListener('input', () => { this.place(); app.surface.invalidate(); });
@@ -58,7 +66,21 @@ export class TextEditor {
     });
     ta.addEventListener('blur', () => this.commit());
     ta.addEventListener('pointerdown', (e) => e.stopPropagation());
-    setTimeout(() => { ta.focus(); ta.select(); }, 0);
+    /*
+     * Caret at the end, not everything selected.
+     *
+     * Opening an existing box with all of its text highlighted means the next
+     * key you press deletes the lot. That is a fine way to REPLACE something
+     * and a terrible default for coming back to fix a word, which is what
+     * re-opening a text box is nearly always for. Every text box on a page
+     * behaves the other way: you get a caret, and the text stays put. Ctrl+A
+     * is still there for anyone who did want all of it.
+     */
+    setTimeout(() => {
+      ta.focus();
+      const end = ta.value.length;
+      ta.setSelectionRange(end, end);
+    }, 0);
     app.surface.invalidate();
   }
 
@@ -73,8 +95,43 @@ export class TextEditor {
     } else box = boundsOf(o);
 
     if (o.type === 'note' && !this.cell) {
-      const grown = this.noteHeight(o, this.el.value);
-      if (grown > o.h) { o.h = grown; box = boundsOf(o); }
+      /*
+       * Grows AND shrinks. It used to only grow, so a note that had swollen to
+       * hold a paragraph stayed that size no matter how much of it you deleted
+       * - you could empty the thing completely and still be looking at a note
+       * four lines tall.
+       *
+       * The floor is the height the note had when this edit began, never
+       * smaller: a note somebody sized by hand keeps the size they gave it.
+       * And the measuring is done against that same fixed height rather than
+       * the live one, because the automatic font size is chosen to fit the
+       * height - measure against a height that is itself changing and the two
+       * chase each other.
+       */
+      const base = this.startH != null ? this.startH : o.h;
+      const want = Math.max(base, this.noteHeight(o, this.el.value, base));
+      if (want !== o.h) { o.h = want; box = boundsOf(o); }
+    }
+
+    /*
+     * A text box is exactly as tall as its words, as you type them.
+     *
+     * It used to keep the height it was created with, so the moment the text
+     * ran past one line the box scrolled inside itself and the first line went
+     * out of sight. Then I made it grow but not shrink, on the theory that
+     * resizing on every backspace would make the frame flinch. That was wrong
+     * twice over: deleting a paragraph left a tall empty box, and the box then
+     * snapped smaller anyway the instant you clicked away, because that is what
+     * commit() has always done. A jump at the end is worse than movement while
+     * typing, and this way there is no jump at all - what you are looking at
+     * while you type is already the finished size.
+     *
+     * Nothing here can oscillate: the width is fixed while editing, so the
+     * number of lines depends on the words alone and never on the height.
+     */
+    if (o.type === 'text' && !this.cell && o.autoSize !== false) {
+      const want = this.fitBox(o, this.el.value).h;
+      if (want !== o.h) { o.h = want; box = boundsOf(o); }
     }
 
     const pad = o.type === 'note' ? Math.max(10, o.w * 0.08) : o.type === 'shape' ? 10 : 0;
@@ -87,7 +144,10 @@ export class TextEditor {
     const face = faceOf(o.font);
     if (!size) {
       this.measure.font = `16px ${face}`;
-      size = fitFontSize(this.measure, this.el.value || ' ', ww, wh, face, '400', o.type === 'note' ? 46 : 72, 10);
+      // A note's type range comes from its own width, so it is the same on
+      // screen whatever zoom the note was made at - see noteTypeRange().
+      const range = o.type === 'note' ? noteTypeRange(o) : { max: 72, min: 10 };
+      size = fitFontSize(this.measure, this.el.value || ' ', ww, wh, face, '400', range.max, range.min);
     }
     const s = this.el.style;
     s.left = p.x + 'px';
@@ -100,8 +160,32 @@ export class TextEditor {
     s.fontWeight = o.bold ? '600' : '400';
     s.fontStyle = o.italic ? 'italic' : 'normal';
     s.textAlign = this.cell ? 'center' : (o.align || (o.type === 'text' ? 'left' : 'center'));
-    s.color = o.type === 'note' ? (o.textColor || readableText(o.color || '#ffd94a')) : (o.color || o.textColor || '#201f1e');
-    s.background = o.type === 'note' ? o.color : 'rgba(255,255,255,.96)';
+    /*
+     * A note carries its own colour, so its text is read off that and is right
+     * in either theme. Everything else is ink on the board, which means on a
+     * dark board it has to follow the same rule the canvas does - otherwise you
+     * type in black onto black and watch nothing appear, then see the words the
+     * moment you click away and the canvas takes over.
+     */
+    const ink = o.type === 'note' ? (o.textColor || readableText(o.color || '#ffd94a'))
+      : inkPaint(o.color || o.textColor);
+    s.color = ink;
+    s.caretColor = ink;                 // a black caret is invisible on a dark note
+    /*
+     * Show what will actually be there.
+     *
+     * Everything except a note used to be typed into an opaque white panel,
+     * which hid the shape it was inside, the ink behind it, and the fact that a
+     * text box has no fill of its own. You typed onto white and got something
+     * else the moment you clicked away. A note keeps its own colour because a
+     * note really is a coloured square; everything else shows whatever the
+     * object will actually be drawn with, which is usually nothing.
+     */
+    s.background = o.type === 'note' ? o.color
+      : (!this.cell && o.background && o.background !== 'none' ? o.background : 'transparent');
+    // The frame has to be visible against whatever it is sitting on, and on a
+    // dark note that is not near-black.
+    s.outlineColor = o.type === 'note' ? ink : 'rgba(0,0,0,.45)';
     s.transform = o.rotation ? `rotate(${o.rotation}rad)` : '';
     s.transformOrigin = '0 0';
     s.padding = '0';
@@ -121,6 +205,8 @@ export class TextEditor {
     const target = this.target;
     const cell = this.cell;
     this.target = null; this.cell = null;
+    this.app.surface.editing = null;      // the canvas owns the text again
+    document.body.classList.remove('typing');
     el.remove();
 
     const store = this.app.store;
@@ -132,21 +218,30 @@ export class TextEditor {
       }
     } else if ((target.text || '') !== value) {
       const patch = { text: value };
-      if (target.type === 'text' && target.autoSize !== false) Object.assign(patch, this.fitBox(target, value));
-      if (target.type === 'note') {
-        // rewind the live growth so update() records the height it had before
-        // this edit, then ask for the height the finished text needs
+      if (target.type === 'text' && target.autoSize !== false) {
+        // Rewind the growth that happened while typing, so the undo entry
+        // records the height the box had BEFORE this edit rather than the one
+        // it drifted to during it. fitBox reads the width and the font, never
+        // the height, so the answer is the same either way.
         if (this.startH != null) target.h = this.startH;
-        const grown = this.noteHeight(target, value);
-        if (grown > target.h) patch.h = grown;
+        Object.assign(patch, this.fitBox(target, value));
+      }
+      if (target.type === 'note') {
+        // Rewind the live resizing so update() records the height the note had
+        // before this edit, then ask for the height the finished text needs -
+        // never below where it started.
+        if (this.startH != null) target.h = this.startH;
+        const base = target.h;
+        const want = Math.max(base, this.noteHeight(target, value, base));
+        if (want !== target.h) patch.h = want;
       }
       store.update(target.id, patch, 'edit text');
       // an empty brand-new text box is not worth keeping
       if (!value && target.type === 'text') store.remove([target.id], 'remove empty text');
     } else if (!value && target.type === 'text' && !target.text) {
       store.remove([target.id], 'remove empty text');
-    } else if (target.type === 'note' && this.startH != null) {
-      target.h = this.startH;      // nothing changed, so neither should the note
+    } else if (this.startH != null && (target.type === 'note' || target.type === 'text')) {
+      target.h = this.startH;      // nothing changed, so neither should the box
     }
     this.startH = null;
 
@@ -183,19 +278,25 @@ export class TextEditor {
    * smaller than the note already is, so a note the user sized by hand keeps
    * the size they gave it.
    */
-  noteHeight(o, value) {
+  noteHeight(o, value, baseH = o.h) {
     const pad = Math.max(10, o.w * 0.08);
     const innerW = Math.max(8, o.w - pad * 2);
     const face = faceOf(o.font);
     const weight = o.bold ? '600' : '400';
     let size = o.fontSize;
     if (!size) {
+      // Against baseH, not the live height. The automatic size is picked to fit
+      // the box, and the box is about to be sized to fit the text: measuring
+      // against a height that is itself moving sets the two chasing each other.
       this.measure.font = `${weight} 16px ${face}`;
-      size = fitFontSize(this.measure, value || ' ', innerW, Math.max(8, o.h - pad * 2), face, weight, 46, 10);
+      const range = noteTypeRange(o);
+      size = fitFontSize(this.measure, value || ' ', innerW, Math.max(8, baseH - pad * 2), face, weight, range.max, range.min);
     }
     this.measure.font = `${weight} ${size}px ${face}`;
     const lines = wrapText(this.measure, value || ' ', innerW);
-    return Math.max(o.h, Math.ceil(lines.length * size * 1.28 + pad * 2));
+    // What the text NEEDS. Whether the note is allowed to become that small is
+    // the caller's business, and the answer is never below the size it started.
+    return Math.ceil(lines.length * size * 1.28 + pad * 2);
   }
 
   cancel() {
@@ -214,8 +315,14 @@ export class TextEditor {
      * should always have done.
      */
     this.el = null; this.target = null; this.cell = null;
+    this.app.surface.editing = null;      // the canvas owns the text again
+    document.body.classList.remove('typing');
     el.remove();
-    if (target && target.type === 'note' && this.startH != null) target.h = this.startH;
+    // A cancelled edit gives back whatever height it grew to while typing -
+    // for a text box exactly as for a note.
+    if (target && (target.type === 'note' || target.type === 'text') && this.startH != null) {
+      target.h = this.startH;
+    }
     this.startH = null;
     if (target && target.type === 'text' && !target.text) this.app.store.remove([target.id], 'remove empty text');
     this.app.afterTextEdit();

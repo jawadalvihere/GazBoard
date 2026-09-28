@@ -7,7 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' app: data: blob:; script-src 'self' app: 'wasm-unsafe-eval'; style-src 'self' app: 'unsafe-inline'; img-src 'self' app: data: blob:; font-src 'self' app: data:; connect-src 'self' app: blob: data: https://api.github.com https://github.com https://kokimavtszlcksriruih.supabase.co wss://kokimavtszlcksriruih.supabase.co; worker-src 'self' app: blob:; manifest-src 'self';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' app: data: blob:; script-src 'self' app: 'wasm-unsafe-eval'; style-src 'self' app: 'unsafe-inline'; img-src 'self' app: data: blob:; font-src 'self' app: data:; connect-src 'self' app: blob: data: https://api.github.com https://github.com https://cdn.jsdelivr.net https://raw.githubusercontent.com https://kokimavtszlcksriruih.supabase.co wss://kokimavtszlcksriruih.supabase.co; worker-src 'self' app: blob:; manifest-src 'self';">
 <title>GazBoard</title>
 <link rel="manifest" href="./manifest.webmanifest">
 <link rel="icon" type="image/png" sizes="192x192" href="./assets/icon-192.png">
@@ -27,9 +27,17 @@
     <span class="badge" id="savedBadge">Saved</span>
     <div class="spacer"></div>
     <button class="tb-btn" id="btnTemplates" title="Templates"></button>
-    <button class="tb-btn" id="btnBackground" title="Format background"></button>
+    <button class="tb-btn" id="btnBackground" title="Canvas"></button>
     <button class="tb-btn" id="btnCapture" title="Save this page as a picture"></button>
     <button class="tb-btn" id="btnExport" title="Export"></button>
+    <button class="tb-btn" id="btnPresent" title="Present (F5) — the board fills the screen; Esc to finish"></button>
+    <!-- Shown only while a board is on its way in. It sits in the flow of the
+         top bar rather than over the canvas, so it can never cover ink. -->
+    <div id="rxBadge">
+      <span class="rx-ring" role="progressbar" aria-valuemin="0" aria-valuemax="100"></span>
+      <span class="rx-label"></span>
+    </div>
+    <button class="tb-btn" id="btnShare" title="Share on this network"></button>
     <button class="tb-btn" id="btnSettings" title="Settings"></button>
     <button class="tb-btn" id="btnHelp" title="Keyboard shortcuts"></button>
   </header>

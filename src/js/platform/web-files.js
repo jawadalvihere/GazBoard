@@ -1,5 +1,7 @@
 // Browser file access, dialogs, and download bridges for the Web/PWA runtime.
 
+import { t } from '../i18n.js';
+
 const _sessionFiles = new Map();
 let _tokenSeq = 0;
 
@@ -127,7 +129,7 @@ export async function readVirtualFile(filePath) {
     return await res.arrayBuffer();
   }
 
-  throw new Error(`File not found: ${filePath}`);
+  throw new Error(t('File not found: {path}', { path: filePath }));
 }
 
 /** Trigger a browser file download for the exported data. */

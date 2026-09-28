@@ -5,19 +5,20 @@ import { uid } from './core/util.js';
 import { boundsOf } from './core/store.js';
 import { openPdf } from './importers/pdf.js';
 import { choosePages } from './ui/pagepicker.js';
+import { t } from './i18n.js';
 
 const IMAGE_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'];
 const DOC_EXT = ['pdf', 'docx', 'doc', 'pptx', 'ppt', 'odt', 'odp', 'rtf', 'txt', 'xlsx', 'xls'];
 
 export const FILTERS = {
-  image: [{ name: 'Images', extensions: IMAGE_EXT }],
+  image: [{ name: t('Images'), extensions: IMAGE_EXT }],
   document: [
-    { name: 'Documents', extensions: DOC_EXT },
+    { name: t('Documents'), extensions: DOC_EXT },
     { name: 'PDF', extensions: ['pdf'] },
     { name: 'Word', extensions: ['docx', 'doc', 'rtf', 'odt'] },
     { name: 'PowerPoint', extensions: ['pptx', 'ppt', 'odp'] }
   ],
-  any: [{ name: 'All supported', extensions: [...IMAGE_EXT, ...DOC_EXT] }]
+  any: [{ name: t('All supported'), extensions: [...IMAGE_EXT, ...DOC_EXT] }]
 };
 
 const bytesToDataUrl = (buf, mime) => new Promise((res) => {
@@ -56,33 +57,105 @@ function looksLikeImage(buf, ext) {
 /** Exposed so the suite can check the sniffer without touching the filesystem. */
 export const looksLikeImageForTest = looksLikeImage;
 
+/**
+ * A name for a picture that came off the clipboard rather than out of a file.
+ *
+ * Imports are checked against their own extension: a file calling itself .png
+ * had better start with the bytes a PNG starts with, or it is turned away as
+ * not the image it claims to be. That check is worth keeping - but a picture
+ * from the clipboard has no name of its own, and calling every one of them
+ * clipboard.png meant a JPEG screenshot was rejected by our own honesty test.
+ *
+ * So the name follows the actual type. Anything unrecognised gets no extension
+ * at all, which skips the check rather than failing it - there is no claim to
+ * verify, and the type already says it is a picture.
+ */
+export function clipboardFileName(type) {
+  const sub = String(type || '').split('/')[1]?.split(';')[0]?.toLowerCase() || '';
+  const ext = sub === 'jpeg' ? 'jpg' : sub === 'svg+xml' ? 'svg' : sub;
+  return IMAGE_EXT.includes(ext) ? `clipboard.${ext}` : 'clipboard';
+}
+
 /** Name every file that was turned away, so a skipped import is never silent. */
 function reportRejected(app, rejected) {
   if (!rejected.length) return;
   const names = rejected.slice(0, 3).join(', ');
-  const more = rejected.length > 3 ? ` and ${rejected.length - 3} more` : '';
   app.toast(rejected.length === 1
-    ? `${names} is not the image it claims to be — skipped`
-    : `${rejected.length} files are not the images they claim to be — skipped: ${names}${more}`, 'help', 4200);
+    ? t('{name} is not the image it claims to be — skipped', { name: names })
+    : rejected.length > 3
+      ? t('{n} files are not the images they claim to be — skipped: {names} and {more} more', { n: rejected.length, names, more: rejected.length - 3 })
+      : t('{n} files are not the images they claim to be — skipped: {names}', { n: rejected.length, names }), 'help', 4200);
 }
 
 function measure(dataUrl) {
   return new Promise((res, rej) => {
     const img = new Image();
     img.onload = () => res({ w: img.naturalWidth || 800, h: img.naturalHeight || 600 });
-    img.onerror = () => rej(new Error('Could not read image'));
+    img.onerror = () => rej(new Error(t('Could not read image')));
     img.src = dataUrl;
   });
 }
 
-/** Free space to the right of everything already on the board. */
+const DROP_GAP = 40;         // breathing room between a new arrival and its neighbours
+const DROP_RINGS = 6;       // how far out to look before giving up on "nearby"
+
+/**
+ * Where a newly inserted picture or page should land.
+ *
+ * The old rule was one line: eighty pixels to the right of everything already
+ * on the board. On a fresh board that is exactly right. On a board that has
+ * been used it is a trap, because "everything" includes the far end - a sticky
+ * note somebody dragged off to the side an hour ago, or the last page of a
+ * ninety-page PDF imported this morning. The new picture then lands beyond ALL
+ * of it, thousands of units from the sentence being written, and since the view
+ * follows what it just inserted, the board appears to bolt sideways and leave
+ * the work behind.
+ *
+ * What a person means by "put it here" is: near what I am looking at, and not
+ * on top of anything. So the search starts at the middle of the current view
+ * and steps outwards a slot at a time until it finds room. Ring by ring, so
+ * whatever it finds is the CLOSEST free space rather than merely the first one
+ * some scan happened to reach - and the ring is left as soon as it yields
+ * anything, because a nearer spot can never appear in a later one.
+ *
+ * Only when the whole neighbourhood is full does it fall back to the old
+ * behaviour, which is the honest answer at that point: there is genuinely no
+ * room near you.
+ */
 export function dropOrigin(app, w, h) {
-  const b = app.store.contentBounds();
   const view = app.surface.cam.viewport(app.surface.width, app.surface.height);
-  if (!b) return { x: view.x + view.w / 2 - w / 2, y: view.y + view.h / 2 - h / 2 };
-  const overlapsView = b.x < view.x + view.w && b.x + b.w > view.x && b.y < view.y + view.h && b.y + b.h > view.y;
-  if (!overlapsView) return { x: view.x + view.w / 2 - w / 2, y: view.y + view.h / 2 - h / 2 };
-  return { x: b.x + b.w + 80, y: b.y };
+  const cx = view.x + view.w / 2, cy = view.y + view.h / 2;
+  const middle = { x: cx - w / 2, y: cy - h / 2 };
+
+  const taken = [];
+  for (const o of app.store.objects) { const b = boundsOf(o); if (b) taken.push(b); }
+  if (!taken.length) return middle;
+
+  const clear = (x, y) => !taken.some((b) =>
+    x < b.x + b.w + DROP_GAP && x + w + DROP_GAP > b.x
+    && y < b.y + b.h + DROP_GAP && y + h + DROP_GAP > b.y);
+
+  if (clear(middle.x, middle.y)) return middle;
+
+  // A slot is the thing's own size: the next place it could sit without
+  // touching where it would have been.
+  const stepX = w + DROP_GAP, stepY = h + DROP_GAP;
+  for (let r = 1; r <= DROP_RINGS; r++) {
+    let best = null, bestD = Infinity;
+    for (let iy = -r; iy <= r; iy++) {
+      for (let ix = -r; ix <= r; ix++) {
+        if (Math.max(Math.abs(ix), Math.abs(iy)) !== r) continue;   // this ring only
+        const x = middle.x + ix * stepX, y = middle.y + iy * stepY;
+        if (!clear(x, y)) continue;
+        const d = Math.hypot(x + w / 2 - cx, y + h / 2 - cy);
+        if (d < bestD) { bestD = d; best = { x, y }; }
+      }
+    }
+    if (best) return best;
+  }
+
+  const b = app.store.contentBounds();
+  return b ? { x: b.x + b.w + DROP_GAP * 2, y: b.y } : middle;
 }
 
 export async function insertImagesFromPaths(app, paths) {
@@ -150,16 +223,16 @@ async function makeImageObject(app, dataUrl, name, index = 0, at) {
  */
 export async function insertDocument(app, filePath, opts = {}) {
   const name = filePath.split(/[\\/]/).pop();
-  const progress = app.showProgress(`Importing ${name}`, 'Converting document…');
+  const progress = app.showProgress(t('Importing {name}', { name }), t('Converting document…'));
   let doc = null;
   try {
     const res = await window.board.importToPdf(filePath);
-    if (!res.ok) { progress.close(); app.toast(res.error || 'Import failed'); return null; }
+    if (!res.ok) { progress.close(); app.toast(res.error || t('Import failed')); return null; }
 
-    progress.update(0.2, res.engine === 'libreoffice' ? 'Converted with LibreOffice — reading pages…' : 'Reading pages…');
+    progress.update(0.2, res.engine === 'libreoffice' ? t('Converted with LibreOffice — reading pages…') : t('Reading pages…'));
     doc = await openPdf(res.data);
     const total = doc.numPages;
-    if (!total) { progress.close(); app.toast('No pages found in that document'); return null; }
+    if (!total) { progress.close(); app.toast(t('No pages found in that document')); return null; }
     progress.close();
 
     let pages = opts.pages || null;
@@ -169,7 +242,7 @@ export async function insertDocument(app, filePath, opts = {}) {
       if (total === 1) { pages = [1]; layout = layout || 'row'; }
       else {
         const choice = await choosePages(app, { name, count: total, thumb: (n) => doc.thumb(n) });
-        if (!choice) { await doc.destroy(); app.toast('Import cancelled'); return null; }
+        if (!choice) { await doc.destroy(); app.toast(t('Import cancelled')); return null; }
         pages = choice.pages;
         layout = choice.layout;
         opts = { ...opts, quality: choice.quality };
@@ -177,10 +250,12 @@ export async function insertDocument(app, filePath, opts = {}) {
     }
     layout = layout || (pages.length > 6 ? 'grid' : 'row');
 
-    const render = app.showProgress(`Importing ${name}`, `Rendering ${pages.length} page${pages.length === 1 ? '' : 's'}…`);
+    const render = app.showProgress(t('Importing {name}', { name }), pages.length === 1
+      ? t('Rendering {n} page…', { n: pages.length })
+      : t('Rendering {n} pages…', { n: pages.length }));
     const rendered = [];
     for (let i = 0; i < pages.length; i++) {
-      render.update((i + 1) / pages.length, `Rendering page ${pages[i]} (${i + 1} of ${pages.length})…`);
+      render.update((i + 1) / pages.length, t('Rendering page {page} ({n} of {total})…', { page: pages[i], n: i + 1, total: pages.length }));
       rendered.push(await doc.render(pages[i], opts.quality ?? app.settings.importQuality ?? 2));
     }
     await doc.destroy();
@@ -195,12 +270,15 @@ export async function insertDocument(app, filePath, opts = {}) {
     app.setSelection([]);                       // separate objects, not a selected clump
     if (focus >= 0) app.goToPage(focus); else app.frameObjects(objs);
     render.close();
-    app.toast(`${name}: ${objs.length} page${objs.length === 1 ? '' : 's'} added${res.engine === 'builtin' ? ' (built-in converter)' : ''}`, 'doc');
+    const n = objs.length;
+    app.toast(res.engine === 'builtin'
+      ? (n === 1 ? t('{name}: {n} page added (built-in converter)', { name, n }) : t('{name}: {n} pages added (built-in converter)', { name, n }))
+      : (n === 1 ? t('{name}: {n} page added', { name, n }) : t('{name}: {n} pages added', { name, n })), 'doc');
     return objs;
   } catch (e) {
     progress.close();
     if (doc) await doc.destroy().catch(() => {});
-    app.toast('Import failed: ' + e.message);
+    app.toast(t('Import failed: {error}', { error: e.message }));
     return null;
   }
 }
@@ -211,7 +289,7 @@ function layoutPages(app, rendered, { name, layout, multiPage }) {
     id: uid('pg'), type: 'image', kind: 'page',
     x: box.x, y: box.y, w: box.w, h: box.h,
     rotation: 0, src: p.dataUrl,
-    name, label: multiPage ? `${name} — page ${p.page}` : name,
+    name, label: multiPage ? t('{name} — page {page}', { name, page: p.page }) : name,
     docSource: name, docPage: p.page
   });
 
@@ -291,7 +369,7 @@ function fitOntoPaper(app, obj) {
 
 export async function pickAndInsertDocument(app) {
   const paths = await window.board.openDialog({
-    title: 'Insert a document',
+    title: t('Insert a document'),
     properties: ['openFile', 'multiSelections'],
     filters: FILTERS.document
   });
@@ -300,7 +378,7 @@ export async function pickAndInsertDocument(app) {
 
 export async function pickAndInsertImage(app) {
   const paths = await window.board.openDialog({
-    title: 'Insert an image',
+    title: t('Insert an image'),
     properties: ['openFile', 'multiSelections'],
     filters: FILTERS.image
   });
