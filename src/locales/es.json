@@ -942,9 +942,9 @@
  "1 board deleted": "1 pizarra eliminada",
  "{n} boards deleted": "{n} pizarras eliminadas",
  "Lock the page in place": "Fijar la página en su sitio",
- "Page is locked - two fingers turn the page. Tap to unlock.": "La página está fijada: pasa la página con dos dedos. Toca para desbloquear.",
- "Lock the page so it cannot be moved by accident": "Fija la página para que no se mueva por accidente",
- "Page locked - two fingers turn the page": "Página fijada: pasa la página con dos dedos",
+ "Page is locked - flick two fingers sideways to turn the page. Tap to unlock.": "La página está fijada: desliza dos dedos hacia un lado para pasar de página. Toca para desbloquear.",
+ "Lock the page - then a sideways two-finger flick turns it": "Fija la página: luego, un deslizamiento lateral con dos dedos la pasa",
+ "Page locked - flick two fingers sideways to turn the page": "Página fijada: desliza dos dedos hacia un lado para pasar de página",
  "Page unlocked - pinch to zoom": "Página desbloqueada: pellizca para hacer zoom",
  "Not saved": "No guardado"
 }

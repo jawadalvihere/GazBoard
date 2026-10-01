@@ -65,9 +65,6 @@ export class Interaction {
     this.action = null;
     this.spaceDown = false;
     this.pinch = null;
-    // Set instead of `pinch` while the view is locked: two fingers turn the
-    // page rather than moving the camera. See startPageSwipe().
-    this.pageSwipe = null;
     this.secondaryPan = null;   // mouse dragging the canvas while the pen draws
     this.lastMotion = null;     // last pointer position of the primary gesture
     this.actionId = null;       // the pointer that owns the gesture in flight
@@ -278,8 +275,7 @@ export class Interaction {
         return;
       }
       if (this.action && !types.every((t) => t === 'touch')) this.startSecondaryPan(e, sp);
-      else if (this.app.viewLocked) this.startPageSwipe();
-      else this.startPinch();
+      else this.startPinch({ flickTurnsPage: this.app.viewLocked });
       return;
     }
     if (this.pointers.size > 2) return;
@@ -540,7 +536,6 @@ export class Interaction {
     this.app.boardPoint = { x: wp.x, y: wp.y, at: performance.now() };
 
     if (this.pinch && this.pointers.size >= 2) { this.updatePinch(); return; }
-    if (this.pageSwipe && this.pointers.size >= 2) { this.updatePageSwipe(); return; }
 
     if (this.secondaryPan && e.pointerId === this.secondaryPan.id) { this.updateSecondaryPan(sp); return; }
 
@@ -848,7 +843,6 @@ export class Interaction {
     this.pointers.delete(e.pointerId);
     if (this.secondaryPan && e.pointerId === this.secondaryPan.id) { this.secondaryPan = null; return; }
     if (this.pinch) { if (this.pointers.size < 2) this.pinch = null; return; }
-    if (this.pageSwipe) { if (this.pointers.size < 2) this.pageSwipe = null; return; }
     const a = this.action;
     if (!a || (this.actionId != null && e.pointerId !== this.actionId)) return;
     this.stopEdgePan();
@@ -2224,44 +2218,16 @@ export class Interaction {
     if (this._edgeRaf) { cancelAnimationFrame(this._edgeRaf); this._edgeRaf = null; }
   }
 
-  /*
-   * Two fingers, view locked: turn the page instead of moving the camera.
+  /**
+   * Two fingers: scroll and zoom.
    *
-   * With the camera pinned to the sheet there is nothing left for a pan or a
-   * pinch to do, which frees the two-finger gesture for the thing people
-   * actually reach for it expecting - turning to the next page. One finger
-   * stays ink, so there is never a question about what a touch meant.
+   * With the view locked, a sideways two-finger flick also turns the page -
+   * but only when sideways had nothing to scroll, because the page already
+   * fits the window's width and is pinned in the middle. The lock used to turn
+   * every two-finger gesture into a page turn, and on a phone, where one
+   * finger draws, that left no way to scroll at all.
    */
-  startPageSwipe() {
-    if (this.action && this.action.type === 'draw') {
-      this.surface.wet = null;
-      this.action = null;
-    } else if (this.action) this.action = null;
-    const [a, b] = [...this.pointers.values()];
-    this.pageSwipe = {
-      x0: (a.sp.x + b.sp.x) / 2,
-      y0: (a.sp.y + b.sp.y) / 2,
-      fired: false
-    };
-  }
-
-  updatePageSwipe() {
-    const s = this.pageSwipe;
-    if (!s || s.fired) return;
-    const [a, b] = [...this.pointers.values()];
-    const dx = (a.sp.x + b.sp.x) / 2 - s.x0;
-    const dy = (a.sp.y + b.sp.y) / 2 - s.y0;
-
-    // Far enough to be meant, and more sideways than not, so resting two
-    // fingers and drifting does not flip the page out from under you.
-    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.2) return;
-
-    s.fired = true;                       // one page per gesture, not a flick-through
-    if (dx < 0) this.app.nextPage();
-    else this.app.prevPage();
-  }
-
-  startPinch() {
+  startPinch({ flickTurnsPage = false } = {}) {
     this.cancelHold();
     if (this.action && this.action.type === 'draw') {
       this.surface.wet = null;
@@ -2284,20 +2250,39 @@ export class Interaction {
     this.pinch = {
       d0: Math.hypot(a.sp.x - b.sp.x, a.sp.y - b.sp.y) || 1,
       c0: { x: (a.sp.x + b.sp.x) / 2, y: (a.sp.y + b.sp.y) / 2 },
-      cam: { x: this.surface.cam.x, y: this.surface.cam.y, z: this.surface.cam.z }
+      cam: { x: this.surface.cam.x, y: this.surface.cam.y, z: this.surface.cam.z },
+      flickTurnsPage,
+      done: false      // a page was turned: ignore the rest of this gesture
     };
   }
 
   updatePinch() {
+    const p = this.pinch;
+    if (p.done) return;
     const [a, b] = [...this.pointers.values()];
     const d = Math.hypot(a.sp.x - b.sp.x, a.sp.y - b.sp.y) || 1;
     const c = { x: (a.sp.x + b.sp.x) / 2, y: (a.sp.y + b.sp.y) / 2 };
-    const p = this.pinch;
     const cam = this.surface.cam;
     cam.x = p.cam.x; cam.y = p.cam.y; cam.z = p.cam.z;
     cam.panBy(c.x - p.c0.x, c.y - p.c0.y);
     cam.zoomAt(c.x, c.y, d / p.d0);
     this.surface.clampCamera();
+
+    if (p.flickTurnsPage) {
+      const dx = c.x - p.c0.x, dy = c.y - p.c0.y;
+      // Far enough to be meant, more sideways than not, not a pinch - and the
+      // page did not actually move sideways, so a scroll is not what happened.
+      const sideways = Math.abs(dx) >= 60 && Math.abs(dx) > Math.abs(dy) * 1.2;
+      const notZooming = Math.abs(d / p.d0 - 1) < 0.15;
+      const pinned = Math.abs(cam.x - p.cam.x) < Math.abs(dx) * 0.3;
+      if (sideways && notZooming && pinned) {
+        p.done = true;                       // one page per gesture
+        cam.x = p.cam.x; cam.y = p.cam.y; cam.z = p.cam.z;
+        if (dx < 0) this.app.nextPage();
+        else this.app.prevPage();
+        return;
+      }
+    }
     this.app.syncZoom();
     this.surface.invalidate();
   }

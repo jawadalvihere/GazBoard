@@ -2169,8 +2169,8 @@ class App {
     // does not keep.
     document.getElementById('zoombar')?.classList.toggle('view-locked', on);
     btn.title = on
-      ? t('Page is locked - two fingers turn the page. Tap to unlock.')
-      : t('Lock the page so it cannot be moved by accident');
+      ? t('Page is locked - flick two fingers sideways to turn the page. Tap to unlock.')
+      : t('Lock the page - then a sideways two-finger flick turns it');
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
   }
 
@@ -2509,7 +2509,7 @@ class App {
     this.saveSettings();
     if (next) this.fitToPage(this.currentPageIndex());
     this.syncUI();
-    this.toast(next ? t('Page locked - two fingers turn the page') : t('Page unlocked - pinch to zoom'), next ? 'lock' : 'unlock');
+    this.toast(next ? t('Page locked - flick two fingers sideways to turn the page') : t('Page unlocked - pinch to zoom'), next ? 'lock' : 'unlock');
   }
 
   /** Which sheet the view is looking at, by what is in the middle of the window. */

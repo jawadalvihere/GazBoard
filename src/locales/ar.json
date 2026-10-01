@@ -942,9 +942,9 @@
  "1 board deleted": "تم حذف لوحة واحدة",
  "{n} boards deleted": "تم حذف اللوحات: {n}",
  "Lock the page in place": "تثبيت الصفحة في مكانها",
- "Page is locked - two fingers turn the page. Tap to unlock.": "الصفحة مثبّتة - اقلب الصفحة بإصبعين. انقر لإلغاء التثبيت.",
- "Lock the page so it cannot be moved by accident": "ثبّت الصفحة حتى لا تتحرك عن طريق الخطأ",
- "Page locked - two fingers turn the page": "تم تثبيت الصفحة - اقلب الصفحة بإصبعين",
+ "Page is locked - flick two fingers sideways to turn the page. Tap to unlock.": "الصفحة مثبّتة - اسحب بإصبعين جانبيًا لقلب الصفحة. انقر لإلغاء التثبيت.",
+ "Lock the page - then a sideways two-finger flick turns it": "ثبّت الصفحة - بعدها يقلبها السحب الجانبي بإصبعين",
+ "Page locked - flick two fingers sideways to turn the page": "تم تثبيت الصفحة - اسحب بإصبعين جانبيًا لقلب الصفحة",
  "Page unlocked - pinch to zoom": "تم إلغاء تثبيت الصفحة - اقرص للتكبير",
  "Not saved": "لم يُحفظ"
 }

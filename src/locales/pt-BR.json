@@ -942,9 +942,9 @@
  "1 board deleted": "1 quadro excluído",
  "{n} boards deleted": "{n} quadros excluídos",
  "Lock the page in place": "Travar a página no lugar",
- "Page is locked - two fingers turn the page. Tap to unlock.": "A página está travada - vire a página com dois dedos. Toque para destravar.",
- "Lock the page so it cannot be moved by accident": "Trave a página para que ela não se mova sem querer",
- "Page locked - two fingers turn the page": "Página travada - vire a página com dois dedos",
+ "Page is locked - flick two fingers sideways to turn the page. Tap to unlock.": "A página está travada - deslize dois dedos para o lado para virar a página. Toque para destravar.",
+ "Lock the page - then a sideways two-finger flick turns it": "Trave a página - depois, deslizar dois dedos para o lado vira a página",
+ "Page locked - flick two fingers sideways to turn the page": "Página travada - deslize dois dedos para o lado para virar a página",
  "Page unlocked - pinch to zoom": "Página destravada - faça pinça para dar zoom",
  "Not saved": "Não salvo"
 }

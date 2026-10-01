@@ -942,9 +942,9 @@
  "1 board deleted": "已删除 1 块白板",
  "{n} boards deleted": "已删除 {n} 块白板",
  "Lock the page in place": "将页面锁定在原位",
- "Page is locked - two fingers turn the page. Tap to unlock.": "页面已锁定 - 用两根手指翻页。轻点即可解锁。",
- "Lock the page so it cannot be moved by accident": "锁定页面，以免被意外移动",
- "Page locked - two fingers turn the page": "页面已锁定 - 用两根手指翻页",
+ "Page is locked - flick two fingers sideways to turn the page. Tap to unlock.": "页面已锁定 - 双指横向轻扫即可翻页。轻点即可解锁。",
+ "Lock the page - then a sideways two-finger flick turns it": "锁定页面 - 之后双指横向轻扫即可翻页",
+ "Page locked - flick two fingers sideways to turn the page": "页面已锁定 - 双指横向轻扫即可翻页",
  "Page unlocked - pinch to zoom": "页面已解锁 - 双指缩放",
  "Not saved": "未保存"
 }

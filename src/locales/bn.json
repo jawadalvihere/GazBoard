@@ -942,9 +942,9 @@
  "1 board deleted": "একটি বোর্ড মুছে ফেলা হয়েছে",
  "{n} boards deleted": "{n}টি বোর্ড মুছে ফেলা হয়েছে",
  "Lock the page in place": "পেজটি জায়গামতো লক করুন",
- "Page is locked - two fingers turn the page. Tap to unlock.": "পেজ লক করা আছে - দুই আঙুলে পেজ উল্টান। আনলক করতে ট্যাপ করুন।",
- "Lock the page so it cannot be moved by accident": "পেজ লক করুন যাতে ভুল করে সরে না যায়",
- "Page locked - two fingers turn the page": "পেজ লক হয়েছে - দুই আঙুলে পেজ উল্টান",
+ "Page is locked - flick two fingers sideways to turn the page. Tap to unlock.": "পেজ লক করা আছে - পেজ উল্টাতে দুই আঙুল পাশে সোয়াইপ করুন। আনলক করতে ট্যাপ করুন।",
+ "Lock the page - then a sideways two-finger flick turns it": "পেজ লক করুন - তারপর দুই আঙুল পাশে সোয়াইপ করলে পেজ উল্টাবে",
+ "Page locked - flick two fingers sideways to turn the page": "পেজ লক হয়েছে - পেজ উল্টাতে দুই আঙুল পাশে সোয়াইপ করুন",
  "Page unlocked - pinch to zoom": "পেজ আনলক হয়েছে - জুম করতে পিঞ্চ করুন",
  "Not saved": "সেভ হয়নি"
 }
