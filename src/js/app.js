@@ -387,7 +387,10 @@ class App {
     cloudSync.attach(this.store);
     this._syncBoardId = null;
     const followBoard = () => {
-      const id = this.store.doc?.id || null;
+      // A lesson's boards are the room's, saved by the room. Following them
+      // here registered each one - the student's too, on every tab switch -
+      // as one of the teacher's own boards, and they piled up in My boards.
+      const id = this.roomMode ? null : (this.store.doc?.id || null);
       if (id === this._syncBoardId) return;
       this._syncBoardId = id;
       cloudSync.setBoard(id);
@@ -456,6 +459,9 @@ class App {
   }
 
   markDirty() {
+    // In a lesson the room saves the board and sets this badge itself;
+    // persist() never runs, so "Saving…" set here would never be cleared.
+    if (this.roomMode) return;
     const b = document.getElementById('savedBadge');
     b.textContent = t('Saving…');
   }

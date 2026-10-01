@@ -1097,6 +1097,8 @@ kbd {
   background: var(--stroke); flex-shrink: 0;
 }
 .room-tab.active .room-count { background: var(--surface-2); }
+/* Something was drawn on this board while you were looking at the other one. */
+.room-count.room-new { background: var(--accent-2); color: #fff; }
 /* ------------------------------------------------------------------ *
  *  A board arriving
  *

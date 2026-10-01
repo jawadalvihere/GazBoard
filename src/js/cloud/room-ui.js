@@ -40,11 +40,12 @@ function render() {
   const counts = room.counts();
   const tab = (side, label) => {
     const n = counts[side];
-    // Saying how much is on each board is what stops an empty one reading as a
-    // tab that did not respond: switching to a blank page looks identical to
-    // nothing happening unless the tab already told you it was blank.
-    const note = n === null ? null
-      : h('span', { class: 'room-count' }, n === 0 ? 'empty' : String(n));
+    // "empty" is what stops a blank board reading as a tab that did not
+    // respond. A count of objects said nothing useful - every pen stroke is
+    // one, so a single word showed up as "7" and looked like a bug. "new"
+    // flags a board that changed while you were looking at the other one.
+    const word = n === 0 ? 'empty' : (viewing !== side && room.fresh(side) ? 'new' : null);
+    const note = word ? h('span', { class: 'room-count' + (word === 'new' ? ' room-new' : '') }, word) : null;
     return h('button', {
       class: 'room-tab' + (viewing === side ? ' active' : '') + (mine === side ? ' own' : ''),
       onclick: () => room.showSide(side)
@@ -84,31 +85,30 @@ function render() {
 }
 
 /**
- * The line that says what you are doing and whether it will survive.
+ * The line that says what you are doing, and who can see it.
  *
- * The warning case is the one that earns its place: the board's owner is the
- * only device that saves it, so marking a student's board while she is not
- * connected writes into nothing. Better to say so before the marking than to
- * let it quietly disappear.
+ * It only claims "live" when the other person is actually looking at the
+ * same board. Marks are saved either way now, so the old "will not be saved"
+ * warning is gone - the line says when the student will see them instead.
  */
 function stateLine() {
-  const marking = room.role() === 'teacher' && room.viewing() === 'student';
+  const live = (text) => h('span', {}, h('span', { class: 'room-live' }), text);
+  const viewing = room.viewing();
+  const marking = room.role() === 'teacher' && viewing === 'student';
 
-  if (marking && !room.otherPresent()) {
-    return h('span', { class: 'room-warn' },
-      h('span', { class: 'room-warn-dot' }),
-      'Student is not connected — marks made now will not be saved');
-  }
   if (marking) {
-    return h('span', {}, h('span', { class: 'room-live' }), 'Marking in red — she sees this live');
+    if (room.watchedBy('student', 'student')) return live('Marking in red — the student sees this live');
+    return room.otherPresent()
+      ? 'Marking in red — saved to their board'
+      : 'Marking in red — saved for when the student opens the link';
   }
   if (room.isMine()) {
-    return room.otherPresent()
-      ? h('span', {}, h('span', { class: 'room-live' }), 'Your board — the other side is connected')
-      : 'Your board';
+    if (room.watchedBy(viewing)) return live('Your board — the other side is watching');
+    return room.otherPresent() ? live('Your board — the other side is connected') : 'Your board';
   }
-  return h('span', {}, h('span', { class: 'room-live' }),
-    `Watching — ${room.viewing() === 'teacher' ? 'teacher' : 'student'} is drawing`);
+  // Watching the other person's board.
+  const whose = viewing === 'teacher' ? 'Watching the teacher’s board' : 'Watching the student’s board';
+  return room.otherPresent() ? live(whose) : whose;
 }
 
 /* ---------------- starting and sharing a room ---------------- */
@@ -123,16 +123,23 @@ export async function startRoom(app) {
   // Starting a lesson while already in one means a NEW lesson: a new link and
   // two empty boards. Leaving first makes that literal, rather than leaving
   // the old room's channel open underneath the new one.
+  //
+  // Otherwise the board on screen comes with you as the teacher's board -
+  // the worksheet you just prepared is what you meant to teach from.
+  let startWith = null;
   if (room.inRoom()) {
     const ok = await app.confirm('Start a new lesson?',
       'You will get a fresh link and two empty boards. The lesson you are in now is kept — its old link still opens it.',
       'New lesson');
     if (!ok) return;
     await room.leaveRoom();
+  } else if (app.store.count) {
+    app.commitTextEdit();
+    startWith = await app.roomDocForSave();
   }
 
   app.toast('Opening a lesson room…');
-  const res = await room.createRoom(app.store.doc.name || 'Lesson');
+  const res = await room.createRoom(app.store.doc.name || 'Lesson', startWith);
   if (!res.ok) { app.toast(res.error, 'close'); return; }
 
   // Go through the join path rather than assuming the role, so the teacher

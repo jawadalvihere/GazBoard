@@ -114,6 +114,10 @@ async function resume(reason) {
     await cloud.pullAll();
   } catch {}
   if (_boardId) await join(_boardId);
+  // No board to follow - a lesson is open, and its boards are the room's - so
+  // "caught up" is as synced as it gets. Without this the pill sat on
+  // "Syncing…" for the whole lesson.
+  else if (navigator.onLine) setStatus('live');
 }
 
 export async function enable(userId) {
@@ -135,7 +139,7 @@ export async function enable(userId) {
   await cloud.pullAll();
   await cloud.flushPush();
   if (_boardId) await join(_boardId);
-  if (navigator.onLine && _channel) setStatus('live');
+  if (navigator.onLine && (_channel || !_boardId)) setStatus('live');
 }
 
 export async function disable() {
@@ -154,6 +158,7 @@ export async function setBoard(id) {
   await leave();
   _boardId = id || null;
   if (_enabled && _boardId) await join(_boardId);
+  else if (_enabled && navigator.onLine) setStatus('live');
 }
 
 async function join(id, attempt = 0) {
