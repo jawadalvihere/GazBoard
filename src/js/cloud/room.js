@@ -53,6 +53,9 @@ let _counts = { teacher: null, student: null };
 // Boards that changed while you were looking at the other one.
 let _fresh = { teacher: false, student: false };
 let _listening = false;
+// Where this device was looking at each board, so switching tabs and back
+// keeps your zoom and place. Per device and per lesson; never saved.
+let _views = { teacher: null, student: null };
 // Changes to the board on screen not yet written. Saving only when there are
 // some matters: a device that merely switches tabs would otherwise write back
 // the copy it loaded, over anything saved since.
@@ -195,6 +198,7 @@ export async function enterRoom(app, token) {
   _peers = [];
   _recent = { teacher: [], student: [] };
   _fresh = { teacher: false, student: false };
+  _views = { teacher: null, student: null };
 
   app.roomMode = true;
   await showSide(_role, data);
@@ -287,6 +291,7 @@ export async function showSide(side, prefetched = null) {
   if (_viewing && _viewing !== side) {
     if (_outTimer) { clearTimeout(_outTimer); flushOps(); }
     await saveNow();
+    _views[_viewing] = _app.surface.cam.toJSON();
   }
 
   let room = prefetched;
@@ -304,7 +309,7 @@ export async function showSide(side, prefetched = null) {
   _viewing = side;
   _fresh[side] = false;
   const doc = side === 'teacher' ? room.teacher_doc : room.student_doc;
-  await _app.loadRoomBoard(doc, side, _title);
+  await _app.loadRoomBoard(doc, side, _title, _views[side]);
   _changes = 0;                            // what is on screen is what is saved
   // Marking someone's work is a different act from writing your own, and it
   // should look like one without anybody having to remember to change pens.

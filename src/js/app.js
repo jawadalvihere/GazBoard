@@ -819,8 +819,14 @@ class App {
     this.syncUI();
   }
 
-  /** Show one side of a lesson room. Never touches the local board list. */
-  async loadRoomBoard(doc, side, title) {
+  /**
+   * Show one side of a lesson room. Never touches the local board list.
+   *
+   * `view` is where this device was last looking at that side - zoom and
+   * position - so flipping between the two tabs does not throw you back to the
+   * fitted page every time. The first look at a side fits the page.
+   */
+  async loadRoomBoard(doc, side, title, view = null) {
     this.surface.selection.clear();
     this.commitTextEdit();
 
@@ -832,7 +838,12 @@ class App {
     this.unsavedNew = false;
     this._unsaved = false;
 
-    if (this.pageCount) this.fitToPage(0); else this.openAtActualSize();
+    if (view) {
+      this.surface.cam.load(view);
+      this.surface.clampCamera();
+      this.syncZoom();
+    } else if (this.pageCount) this.fitToPage(0);
+    else this.openAtActualSize();
     document.getElementById('boardTitle').value =
       `${title} - ${side === 'teacher' ? 'Teacher' : 'Student'}`;
     this.surface.invalidate();
